@@ -1,0 +1,34 @@
+name: Oatmeal
+
+options:
+  bundleIdPrefix: ai.oatmeal
+
+packages:
+  Oatmeal:
+    path: .
+
+targets:
+  OatmealMac:
+    type: application
+    platform: macOS
+    productName: Oatmeal
+    deploymentTarget: "15.0"
+    sources:
+      - path: OatmealMac
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.oatmeal.mac
+        PRODUCT_NAME: Oatmeal
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: OatmealMac/Info.plist
+    dependencies:
+      - package: Oatmeal
+        product: OatmealUI
+
+schemes:
+  OatmealMac:
+    build:
+      targets:
+        OatmealMac: all
+    run:
+      config: Debug
