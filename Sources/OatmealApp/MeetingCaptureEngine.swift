@@ -9,11 +9,37 @@ enum CaptureMode: String, Equatable, Sendable {
     case systemAudioAndMicrophone
 }
 
+enum LiveTranscriptionChunkSource: String, Equatable, Sendable {
+    case mixed
+    case systemAudio
+    case microphone
+
+    var defaultSpeakerName: String? {
+        switch self {
+        case .mixed:
+            nil
+        case .systemAudio:
+            "Meeting Audio"
+        case .microphone:
+            "Me"
+        }
+    }
+}
+
 struct ActiveCaptureSession: Equatable, Sendable {
     let noteID: UUID
     let startedAt: Date
     let fileURL: URL
     let mode: CaptureMode
+}
+
+struct LiveTranscriptionChunk: Equatable, Sendable, Identifiable {
+    let id: String
+    let noteID: UUID
+    let source: LiveTranscriptionChunkSource
+    let fileURL: URL
+    let startedAt: Date
+    let endedAt: Date
 }
 
 struct CaptureArtifact: Equatable, Sendable {
@@ -25,6 +51,49 @@ struct CaptureArtifact: Equatable, Sendable {
 
     var duration: TimeInterval {
         endedAt.timeIntervalSince(startedAt)
+    }
+}
+
+struct CaptureRuntimeHealthSnapshot: Equatable, Sendable {
+    let noteID: UUID
+    let microphoneLastActivityAt: Date?
+    let systemAudioLastActivityAt: Date?
+}
+
+enum CaptureRuntimeEventKind: String, Equatable, Sendable {
+    case degraded
+    case recovered
+    case failed
+}
+
+enum CaptureRuntimeEventSource: String, Equatable, Sendable {
+    case microphone
+    case systemAudio
+    case capturePipeline
+}
+
+struct CaptureRuntimeEvent: Equatable, Sendable, Identifiable {
+    let id: UUID
+    let noteID: UUID
+    let kind: CaptureRuntimeEventKind
+    let source: CaptureRuntimeEventSource
+    let message: String
+    let createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        noteID: UUID,
+        kind: CaptureRuntimeEventKind,
+        source: CaptureRuntimeEventSource,
+        message: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.noteID = noteID
+        self.kind = kind
+        self.source = source
+        self.message = message
+        self.createdAt = createdAt
     }
 }
 
@@ -63,6 +132,9 @@ protocol MeetingCaptureEngineServing {
     func startCapture(for noteID: UUID, mode: CaptureMode) async throws -> ActiveCaptureSession
     func stopCapture() async throws -> CaptureArtifact
     func recordingURL(for noteID: UUID) -> URL?
+    func liveTranscriptionChunks(for noteID: UUID) -> [LiveTranscriptionChunk]
+    func runtimeHealthSnapshot(for noteID: UUID) -> CaptureRuntimeHealthSnapshot?
+    func consumeRuntimeEvents(for noteID: UUID) -> [CaptureRuntimeEvent]
     func deleteRecording(for noteID: UUID) throws
 }
 
@@ -70,15 +142,18 @@ protocol MeetingCaptureEngineServing {
 final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
     private let fileManager: FileManager
     private let persistence: AppPersistence
+    private let liveChunkDuration: TimeInterval
 
     private var activeRecorder: (any CaptureRecorder)?
 
     init(
         fileManager: FileManager = .default,
-        persistence: AppPersistence = .shared
+        persistence: AppPersistence = .shared,
+        liveChunkDuration: TimeInterval = 8
     ) {
         self.fileManager = fileManager
         self.persistence = persistence
+        self.liveChunkDuration = liveChunkDuration
     }
 
     var activeSession: ActiveCaptureSession? {
@@ -86,24 +161,33 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
     }
 
     func startCapture(for noteID: UUID, mode: CaptureMode) async throws -> ActiveCaptureSession {
-        guard activeRecorder == nil else {
-            throw CaptureEngineError.alreadyCapturing
+        if let activeRecorder {
+            if activeRecorder.hasOngoingCapture {
+                throw CaptureEngineError.alreadyCapturing
+            }
+
+            self.activeRecorder = nil
         }
 
         try prepareRecordingDirectory()
         try clearExistingRecordingFiles(for: noteID)
+        try prepareLiveChunkDirectory(for: noteID)
 
         let recorder: any CaptureRecorder
         switch mode {
         case .microphoneOnly:
             recorder = MicrophoneCaptureRecorder(
                 noteID: noteID,
-                fileURL: microphoneRecordingURL(for: noteID)
+                fileURL: microphoneRecordingURL(for: noteID),
+                liveChunkDirectoryURL: liveChunkDirectoryURL(for: noteID),
+                liveChunkDuration: liveChunkDuration
             )
         case .systemAudioAndMicrophone:
             recorder = try await ScreenAudioCaptureRecorder(
                 noteID: noteID,
-                fileURL: systemAudioRecordingURL(for: noteID)
+                fileURL: systemAudioRecordingURL(for: noteID),
+                liveChunkDirectoryURL: liveChunkDirectoryURL(for: noteID),
+                liveChunkDuration: liveChunkDuration
             )
         }
 
@@ -118,6 +202,11 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
 
     func stopCapture() async throws -> CaptureArtifact {
         guard let recorder = activeRecorder else {
+            throw CaptureEngineError.noActiveCapture
+        }
+
+        guard recorder.hasOngoingCapture else {
+            activeRecorder = nil
             throw CaptureEngineError.noActiveCapture
         }
 
@@ -145,6 +234,34 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
         return nil
     }
 
+    func liveTranscriptionChunks(for noteID: UUID) -> [LiveTranscriptionChunk] {
+        if activeRecorder?.captureNoteID == noteID, activeRecorder?.hasOngoingCapture == true {
+            return activeRecorder?.completedLiveTranscriptionChunks ?? []
+        }
+
+        return persistedLiveTranscriptionChunks(for: noteID)
+    }
+
+    func runtimeHealthSnapshot(for noteID: UUID) -> CaptureRuntimeHealthSnapshot? {
+        guard let activeRecorder, activeRecorder.captureNoteID == noteID else {
+            return nil
+        }
+
+        return activeRecorder.runtimeHealthSnapshot
+    }
+
+    func consumeRuntimeEvents(for noteID: UUID) -> [CaptureRuntimeEvent] {
+        guard let activeRecorder, activeRecorder.captureNoteID == noteID else {
+            return []
+        }
+
+        let events = activeRecorder.consumeRuntimeEvents()
+        if !activeRecorder.hasOngoingCapture {
+            self.activeRecorder = nil
+        }
+        return events
+    }
+
     func deleteRecording(for noteID: UUID) throws {
         try clearExistingRecordingFiles(for: noteID)
     }
@@ -161,8 +278,23 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
         persistence.applicationSupportDirectoryURL.appendingPathComponent("Recordings", isDirectory: true)
     }
 
+    private func liveChunkDirectoryURL(for noteID: UUID) -> URL {
+        recordingsDirectoryURL
+            .appendingPathComponent("LiveChunks", isDirectory: true)
+            .appendingPathComponent(noteID.uuidString, isDirectory: true)
+    }
+
     private func prepareRecordingDirectory() throws {
         let directoryURL = recordingsDirectoryURL
+        if fileManager.fileExists(atPath: directoryURL.path) {
+            return
+        }
+
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    }
+
+    private func prepareLiveChunkDirectory(for noteID: UUID) throws {
+        let directoryURL = liveChunkDirectoryURL(for: noteID)
         if fileManager.fileExists(atPath: directoryURL.path) {
             return
         }
@@ -176,11 +308,76 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
                 try fileManager.removeItem(at: url)
             }
         }
+
+        let liveChunkDirectoryURL = liveChunkDirectoryURL(for: noteID)
+        if fileManager.fileExists(atPath: liveChunkDirectoryURL.path) {
+            try fileManager.removeItem(at: liveChunkDirectoryURL)
+        }
+    }
+
+    private func persistedLiveTranscriptionChunks(for noteID: UUID) -> [LiveTranscriptionChunk] {
+        let directoryURL = liveChunkDirectoryURL(for: noteID)
+        guard fileManager.fileExists(atPath: directoryURL.path) else {
+            return []
+        }
+
+        let keys: [URLResourceKey] = [.isRegularFileKey, .creationDateKey, .contentModificationDateKey]
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return urls.compactMap { url in
+            guard url.pathExtension.lowercased() == "caf" else {
+                return nil
+            }
+
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true else {
+                return nil
+            }
+
+            let chunkID = url.deletingPathExtension().lastPathComponent
+            guard let separatorIndex = chunkID.lastIndex(of: "-") else {
+                return nil
+            }
+
+            let sourceRawValue = String(chunkID[..<separatorIndex])
+            guard let source = LiveTranscriptionChunkSource(rawValue: sourceRawValue) else {
+                return nil
+            }
+
+            let startedAt = values.creationDate ?? values.contentModificationDate ?? .distantPast
+            let endedAt = values.contentModificationDate ?? startedAt
+
+            return LiveTranscriptionChunk(
+                id: chunkID,
+                noteID: noteID,
+                source: source,
+                fileURL: url,
+                startedAt: startedAt,
+                endedAt: endedAt
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.startedAt == rhs.startedAt {
+                return lhs.id < rhs.id
+            }
+            return lhs.startedAt < rhs.startedAt
+        }
     }
 }
 
 private protocol CaptureRecorder: Sendable {
+    var captureNoteID: UUID { get }
+    var hasOngoingCapture: Bool { get }
     var activeSession: ActiveCaptureSession? { get }
+    var completedLiveTranscriptionChunks: [LiveTranscriptionChunk] { get }
+    var runtimeHealthSnapshot: CaptureRuntimeHealthSnapshot? { get }
+    func consumeRuntimeEvents() -> [CaptureRuntimeEvent]
     func start() async throws -> ActiveCaptureSession
     func stop() async throws -> CaptureArtifact
 }
@@ -188,18 +385,74 @@ private protocol CaptureRecorder: Sendable {
 private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Sendable {
     private let noteID: UUID
     private let fileURL: URL
+    private let liveChunkDirectoryURL: URL
+    private let liveChunkDuration: TimeInterval
+    private let notificationCenter: NotificationCenter
+    private let lock = NSLock()
+    private let recoveryQueue: DispatchQueue
 
     private var audioEngine: AVAudioEngine?
     private var recordingFile: AVAudioFile?
     private var activeSessionStorage: ActiveCaptureSession?
+    private var liveChunkRecorder: RollingAudioChunkRecorder?
+    private var observerTokens: [NSObjectProtocol] = []
+    private var runtimeEventsStorage: [CaptureRuntimeEvent] = []
+    private var isAttemptingRecovery = false
+    private var lastInputSampleAt: Date?
 
-    init(noteID: UUID, fileURL: URL) {
+    init(
+        noteID: UUID,
+        fileURL: URL,
+        liveChunkDirectoryURL: URL,
+        liveChunkDuration: TimeInterval,
+        notificationCenter: NotificationCenter = .default
+    ) {
         self.noteID = noteID
         self.fileURL = fileURL
+        self.liveChunkDirectoryURL = liveChunkDirectoryURL
+        self.liveChunkDuration = liveChunkDuration
+        self.notificationCenter = notificationCenter
+        recoveryQueue = DispatchQueue(label: "ai.oatmeal.capture.mic-recovery.\(noteID.uuidString)")
+    }
+
+    var captureNoteID: UUID {
+        noteID
+    }
+
+    var hasOngoingCapture: Bool {
+        lock.withLock { activeSessionStorage != nil }
     }
 
     var activeSession: ActiveCaptureSession? {
         activeSessionStorage
+    }
+
+    var completedLiveTranscriptionChunks: [LiveTranscriptionChunk] {
+        lock.withLock {
+            liveChunkRecorder?.completedChunks ?? []
+        }
+    }
+
+    var runtimeHealthSnapshot: CaptureRuntimeHealthSnapshot? {
+        lock.withLock {
+            guard activeSessionStorage != nil else {
+                return nil
+            }
+
+            return CaptureRuntimeHealthSnapshot(
+                noteID: noteID,
+                microphoneLastActivityAt: lastInputSampleAt,
+                systemAudioLastActivityAt: nil
+            )
+        }
+    }
+
+    func consumeRuntimeEvents() -> [CaptureRuntimeEvent] {
+        lock.withLock {
+            let events = runtimeEventsStorage
+            runtimeEventsStorage.removeAll()
+            return events
+        }
     }
 
     func start() async throws -> ActiveCaptureSession {
@@ -223,20 +476,22 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
             throw CaptureEngineError.failedToPrepareRecording(error.localizedDescription)
         }
 
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { buffer, _ in
-            do {
-                try recordingFile.write(from: buffer)
-            } catch {
-                // Prototype path: write failures surface as truncated output.
-            }
-        }
+        let liveChunkRecorder = RollingAudioChunkRecorder(
+            noteID: noteID,
+            source: .microphone,
+            directoryURL: liveChunkDirectoryURL,
+            format: inputFormat,
+            chunkDuration: liveChunkDuration
+        )
 
-        engine.prepare()
         do {
-            try engine.start()
+            try installRecordingTap(
+                on: engine,
+                inputFormat: inputFormat,
+                recordingFile: recordingFile,
+                liveChunkRecorder: liveChunkRecorder
+            )
         } catch {
-            inputNode.removeTap(onBus: 0)
             throw CaptureEngineError.failedToStartRecording(error.localizedDescription)
         }
 
@@ -250,6 +505,11 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
         self.recordingFile = recordingFile
         audioEngine = engine
         activeSessionStorage = session
+        self.liveChunkRecorder = liveChunkRecorder
+        lock.withLock {
+            lastInputSampleAt = session.startedAt
+        }
+        startObservingDeviceChanges(for: engine)
         return session
     }
 
@@ -258,14 +518,27 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
             throw CaptureEngineError.noActiveCapture
         }
 
+        stopObservingDeviceChanges()
         let inputNode = engine.inputNode
         inputNode.removeTap(onBus: 0)
         engine.stop()
         engine.reset()
 
+        lock.withLock {
+            do {
+                try liveChunkRecorder?.finishOpenChunk(endedAt: Date())
+            } catch {
+                // Keep stop resilient if the sidecar live chunk cannot be finalized cleanly.
+            }
+        }
+
         audioEngine = nil
         recordingFile = nil
         activeSessionStorage = nil
+        liveChunkRecorder = nil
+        lock.withLock {
+            lastInputSampleAt = nil
+        }
 
         return CaptureArtifact(
             noteID: session.noteID,
@@ -275,12 +548,309 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
             mode: session.mode
         )
     }
+
+    private func installRecordingTap(
+        on engine: AVAudioEngine,
+        inputFormat: AVAudioFormat,
+        recordingFile: AVAudioFile,
+        liveChunkRecorder: RollingAudioChunkRecorder
+    ) throws {
+        let inputNode = engine.inputNode
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { buffer, _ in
+            let capturedAt = Date()
+            do {
+                try recordingFile.write(from: buffer)
+            } catch {
+                // Prototype path: write failures surface as truncated output.
+            }
+
+            self.lock.withLock {
+                self.lastInputSampleAt = capturedAt
+                do {
+                    try liveChunkRecorder.append(buffer, capturedAt: capturedAt)
+                } catch {
+                    // Keep the full recording path authoritative even if live chunking fails.
+                }
+            }
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            throw error
+        }
+    }
+
+    private func startObservingDeviceChanges(for engine: AVAudioEngine) {
+        stopObservingDeviceChanges()
+
+        let configurationChangeName = NSNotification.Name.AVAudioEngineConfigurationChange
+        observerTokens.append(
+            notificationCenter.addObserver(forName: configurationChangeName, object: engine, queue: nil) { [weak self] _ in
+                self?.scheduleRecoveryAttempt(
+                    degradedMessage: "Microphone configuration changed. Oatmeal is reconnecting the input automatically.",
+                    recoveredMessage: "Microphone configuration changed. Oatmeal recovered the input automatically."
+                )
+            }
+        )
+
+        observerTokens.append(
+            notificationCenter.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: nil) { [weak self] notification in
+                guard let self, Self.notificationTargetsAudioDevice(notification) else {
+                    return
+                }
+
+                self.scheduleRecoveryAttempt(
+                    degradedMessage: "A microphone device disconnected. Oatmeal is trying to recover the input automatically.",
+                    recoveredMessage: "A microphone device changed. Oatmeal recovered the input automatically."
+                )
+            }
+        )
+
+        observerTokens.append(
+            notificationCenter.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: nil) { [weak self] notification in
+                guard let self, Self.notificationTargetsAudioDevice(notification) else {
+                    return
+                }
+
+                self.scheduleRecoveryAttempt(
+                    degradedMessage: "A microphone device connected, but Oatmeal could not switch the live capture automatically. Stop and restart capture if your voice does not return.",
+                    recoveredMessage: "A microphone device connected. Oatmeal recovered the input automatically."
+                )
+            }
+        )
+    }
+
+    private func stopObservingDeviceChanges() {
+        observerTokens.forEach(notificationCenter.removeObserver)
+        observerTokens.removeAll()
+    }
+
+    private func scheduleRecoveryAttempt(
+        degradedMessage: String,
+        recoveredMessage: String
+    ) {
+        recoveryQueue.async { [weak self] in
+            self?.attemptAutomaticRecovery(
+                degradedMessage: degradedMessage,
+                recoveredMessage: recoveredMessage
+            )
+        }
+    }
+
+    private func attemptAutomaticRecovery(
+        degradedMessage: String,
+        recoveredMessage: String
+    ) {
+        let shouldAttempt = lock.withLock { () -> Bool in
+            guard activeSessionStorage != nil, !isAttemptingRecovery else {
+                return false
+            }
+            isAttemptingRecovery = true
+            return true
+        }
+
+        guard shouldAttempt else {
+            return
+        }
+
+        defer {
+            lock.withLock {
+                isAttemptingRecovery = false
+            }
+        }
+
+        guard let recordingFile, let liveChunkRecorder else {
+            enqueueRuntimeEvent(kind: .degraded, message: degradedMessage)
+            return
+        }
+
+        let newEngine = AVAudioEngine()
+        let inputFormat = newEngine.inputNode.inputFormat(forBus: 0)
+        guard inputFormat.channelCount > 0 else {
+            enqueueRuntimeEvent(
+                kind: .degraded,
+                message: "No microphone input is currently available. Reconnect a microphone, then stop and restart capture if your voice does not return."
+            )
+            return
+        }
+
+        let recordingFormat = recordingFile.processingFormat
+        guard Self.formatsAreCompatible(inputFormat, recordingFormat) else {
+            enqueueRuntimeEvent(
+                kind: .degraded,
+                message: "The microphone changed to an incompatible input format. Oatmeal kept the recording safe, but stop and restart capture to continue with the new device."
+            )
+            return
+        }
+
+        do {
+            try installRecordingTap(
+                on: newEngine,
+                inputFormat: inputFormat,
+                recordingFile: recordingFile,
+                liveChunkRecorder: liveChunkRecorder
+            )
+        } catch {
+            enqueueRuntimeEvent(
+                kind: .degraded,
+                message: "\(degradedMessage) \(error.localizedDescription)"
+            )
+            return
+        }
+
+        let oldEngine = lock.withLock { () -> AVAudioEngine? in
+            let engine = audioEngine
+            audioEngine = newEngine
+            return engine
+        }
+
+        oldEngine?.inputNode.removeTap(onBus: 0)
+        oldEngine?.stop()
+        oldEngine?.reset()
+        startObservingDeviceChanges(for: newEngine)
+        enqueueRuntimeEvent(kind: .recovered, message: recoveredMessage)
+    }
+
+    private func enqueueRuntimeEvent(kind: CaptureRuntimeEventKind, message: String, createdAt: Date = Date()) {
+        lock.withLock {
+            if let lastEvent = runtimeEventsStorage.last,
+               lastEvent.kind == kind,
+               lastEvent.message == message {
+                return
+            }
+
+            runtimeEventsStorage.append(
+                CaptureRuntimeEvent(
+                    noteID: noteID,
+                    kind: kind,
+                    source: .microphone,
+                    message: message,
+                    createdAt: createdAt
+                )
+            )
+        }
+    }
+
+    private static func formatsAreCompatible(_ lhs: AVAudioFormat, _ rhs: AVAudioFormat) -> Bool {
+        lhs.sampleRate == rhs.sampleRate
+            && lhs.channelCount == rhs.channelCount
+            && lhs.commonFormat == rhs.commonFormat
+            && lhs.isInterleaved == rhs.isInterleaved
+    }
+
+    private static func notificationTargetsAudioDevice(_ notification: Notification) -> Bool {
+        guard let device = notification.object as? AVCaptureDevice else {
+            return false
+        }
+
+        return device.hasMediaType(.audio)
+    }
+}
+
+private final class RollingAudioChunkRecorder: @unchecked Sendable {
+    private let noteID: UUID
+    private let source: LiveTranscriptionChunkSource
+    private let directoryURL: URL
+    private let format: AVAudioFormat
+    private let chunkDurationFrames: AVAudioFramePosition
+
+    private(set) var completedChunks: [LiveTranscriptionChunk] = []
+    private var currentChunkFile: AVAudioFile?
+    private var currentChunkIndex = 0
+    private var currentChunkStartedAt: Date?
+    private var currentChunkFrameCount: AVAudioFramePosition = 0
+    private var currentChunkFileURL: URL?
+
+    init(
+        noteID: UUID,
+        source: LiveTranscriptionChunkSource,
+        directoryURL: URL,
+        format: AVAudioFormat,
+        chunkDuration: TimeInterval
+    ) {
+        self.noteID = noteID
+        self.source = source
+        self.directoryURL = directoryURL
+        self.format = format
+        self.chunkDurationFrames = AVAudioFramePosition(max(format.sampleRate * max(chunkDuration, 1), 1))
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer, capturedAt: Date) throws {
+        if currentChunkFile == nil {
+            try beginChunk(at: capturedAt)
+        }
+
+        guard let currentChunkFile else {
+            return
+        }
+
+        try currentChunkFile.write(from: buffer)
+        currentChunkFrameCount += AVAudioFramePosition(buffer.frameLength)
+
+        if currentChunkFrameCount >= chunkDurationFrames {
+            try finishOpenChunk(endedAt: capturedAt)
+        }
+    }
+
+    func finishOpenChunk(endedAt: Date) throws {
+        guard let startedAt = currentChunkStartedAt, let fileURL = currentChunkFileURL else {
+            currentChunkFile = nil
+            currentChunkStartedAt = nil
+            currentChunkFileURL = nil
+            currentChunkFrameCount = 0
+            return
+        }
+
+        currentChunkFile = nil
+        currentChunkStartedAt = nil
+        currentChunkFileURL = nil
+
+        completedChunks.append(
+            LiveTranscriptionChunk(
+                id: "\(source.rawValue)-\(currentChunkIndex - 1)",
+                noteID: noteID,
+                source: source,
+                fileURL: fileURL,
+                startedAt: startedAt,
+                endedAt: endedAt
+            )
+        )
+        currentChunkFrameCount = 0
+    }
+
+    private func beginChunk(at capturedAt: Date) throws {
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let fileURL = directoryURL.appendingPathComponent(
+            "\(source.rawValue)-\(String(format: "%04d", currentChunkIndex)).caf",
+            isDirectory: false
+        )
+        currentChunkIndex += 1
+        currentChunkFile = try AVAudioFile(
+            forWriting: fileURL,
+            settings: format.settings,
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved
+        )
+        currentChunkStartedAt = capturedAt
+        currentChunkFileURL = fileURL
+        currentChunkFrameCount = 0
+    }
 }
 
 private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unchecked Sendable {
     private let noteID: UUID
     private let fileURL: URL
+    private let liveChunkDirectoryURL: URL
+    private let liveChunkDuration: TimeInterval
+    private let notificationCenter: NotificationCenter
     private let lock = NSLock()
+    private let sampleHandlerQueue: DispatchQueue
+    private let healthMonitorInterval: TimeInterval = 2
+    private let sourceHeartbeatTimeout: TimeInterval = 6
 
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
@@ -289,10 +859,30 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
     private var pendingArtifact: CaptureArtifact?
     private var startContinuation: CheckedContinuation<ActiveCaptureSession, Error>?
     private var stopContinuation: CheckedContinuation<CaptureArtifact, Error>?
+    private var completedLiveChunksStorage: [LiveTranscriptionChunk] = []
+    private var liveChunkRecorders: [LiveTranscriptionChunkSource: RollingAudioChunkRecorder] = [:]
+    private var observerTokens: [NSObjectProtocol] = []
+    private var runtimeEventsStorage: [CaptureRuntimeEvent] = []
+    private var microphoneInputIsDegraded = false
+    private var systemAudioInputIsDegraded = false
+    private var lastMicrophoneSampleAt: Date?
+    private var lastSystemAudioSampleAt: Date?
+    private var healthMonitorTimer: DispatchSourceTimer?
+    private var unexpectedFailureHandled = false
 
-    init(noteID: UUID, fileURL: URL) async throws {
+    init(
+        noteID: UUID,
+        fileURL: URL,
+        liveChunkDirectoryURL: URL,
+        liveChunkDuration: TimeInterval,
+        notificationCenter: NotificationCenter = .default
+    ) async throws {
         self.noteID = noteID
         self.fileURL = fileURL
+        self.liveChunkDirectoryURL = liveChunkDirectoryURL
+        self.liveChunkDuration = liveChunkDuration
+        self.notificationCenter = notificationCenter
+        sampleHandlerQueue = DispatchQueue(label: "ai.oatmeal.capture.live-chunks.\(noteID.uuidString)")
         super.init()
 
         let shareableContent = try await Self.currentShareableContent()
@@ -336,6 +926,10 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
 
         do {
             try stream.addRecordingOutput(recordingOutput)
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleHandlerQueue)
+            if #available(macOS 15.0, *) {
+                try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleHandlerQueue)
+            }
         } catch {
             throw CaptureEngineError.failedToPrepareRecording(error.localizedDescription)
         }
@@ -346,6 +940,46 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
 
     var activeSession: ActiveCaptureSession? {
         lock.withLock { activeSessionStorage }
+    }
+
+    var captureNoteID: UUID {
+        noteID
+    }
+
+    var hasOngoingCapture: Bool {
+        lock.withLock {
+            activeSessionStorage != nil
+                || pendingSession != nil
+                || pendingArtifact != nil
+                || startContinuation != nil
+                || stopContinuation != nil
+        }
+    }
+
+    var completedLiveTranscriptionChunks: [LiveTranscriptionChunk] {
+        lock.withLock { completedLiveChunksStorage }
+    }
+
+    var runtimeHealthSnapshot: CaptureRuntimeHealthSnapshot? {
+        lock.withLock {
+            guard activeSessionStorage != nil || pendingSession != nil else {
+                return nil
+            }
+
+            return CaptureRuntimeHealthSnapshot(
+                noteID: noteID,
+                microphoneLastActivityAt: lastMicrophoneSampleAt,
+                systemAudioLastActivityAt: lastSystemAudioSampleAt
+            )
+        }
+    }
+
+    func consumeRuntimeEvents() -> [CaptureRuntimeEvent] {
+        lock.withLock {
+            let events = runtimeEventsStorage
+            runtimeEventsStorage.removeAll()
+            return events
+        }
     }
 
     func start() async throws -> ActiveCaptureSession {
@@ -362,7 +996,12 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
 
         lock.withLock {
             pendingSession = session
+            unexpectedFailureHandled = false
+            lastMicrophoneSampleAt = session.startedAt
+            lastSystemAudioSampleAt = session.startedAt
         }
+        startObservingDeviceChanges()
+        startHealthMonitor()
 
         return try await withCheckedThrowingContinuation { continuation in
             lock.withLock {
@@ -381,6 +1020,8 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
             throw CaptureEngineError.noActiveCapture
         }
 
+        stopObservingDeviceChanges()
+        stopHealthMonitor()
         let artifact = CaptureArtifact(
             noteID: session.noteID,
             fileURL: session.fileURL,
@@ -405,6 +1046,289 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
         }
     }
 
+    private func appendLiveSampleBuffer(_ sampleBuffer: CMSampleBuffer, source: LiveTranscriptionChunkSource) {
+        guard CMSampleBufferDataIsReady(sampleBuffer) else {
+            return
+        }
+
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return
+        }
+
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0 else {
+            return
+        }
+
+        let audioFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+        guard let pcmBuffer = AVAudioPCMBuffer(
+            pcmFormat: audioFormat,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ) else {
+            return
+        }
+
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
+        )
+        guard status == noErr else {
+            return
+        }
+
+        pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
+        let capturedAt = Date()
+
+        lock.withLock {
+            switch source {
+            case .microphone:
+                lastMicrophoneSampleAt = capturedAt
+                if microphoneInputIsDegraded {
+                    microphoneInputIsDegraded = false
+                    enqueueRuntimeEventLocked(
+                        kind: .recovered,
+                        source: .microphone,
+                        message: "Microphone input recovered. Oatmeal resumed live capture automatically.",
+                        createdAt: capturedAt
+                    )
+                }
+            case .systemAudio:
+                lastSystemAudioSampleAt = capturedAt
+                if systemAudioInputIsDegraded {
+                    systemAudioInputIsDegraded = false
+                    enqueueRuntimeEventLocked(
+                        kind: .recovered,
+                        source: .systemAudio,
+                        message: "System audio recovered. Oatmeal resumed the meeting feed automatically.",
+                        createdAt: capturedAt
+                    )
+                }
+            case .mixed:
+                break
+            }
+
+            let recorder = recorderForLiveSource(source, format: audioFormat)
+            do {
+                try recorder.append(pcmBuffer, capturedAt: capturedAt)
+                refreshCompletedLiveChunksStorage()
+            } catch {
+                // The full recording artifact remains authoritative even if live chunking drops a sample.
+            }
+        }
+    }
+
+    private func recorderForLiveSource(
+        _ source: LiveTranscriptionChunkSource,
+        format: AVAudioFormat
+    ) -> RollingAudioChunkRecorder {
+        if let recorder = liveChunkRecorders[source] {
+            return recorder
+        }
+
+        let recorder = RollingAudioChunkRecorder(
+            noteID: noteID,
+            source: source,
+            directoryURL: liveChunkDirectoryURL,
+            format: format,
+            chunkDuration: liveChunkDuration
+        )
+        liveChunkRecorders[source] = recorder
+        return recorder
+    }
+
+    private func finishOpenLiveChunks(endedAt: Date) {
+        lock.withLock {
+            for recorder in liveChunkRecorders.values {
+                do {
+                    try recorder.finishOpenChunk(endedAt: endedAt)
+                } catch {
+                    // Preserve the primary recording even if one live chunk cannot be finalized.
+                }
+            }
+            refreshCompletedLiveChunksStorage()
+        }
+    }
+
+    private func refreshCompletedLiveChunksStorage() {
+        completedLiveChunksStorage = liveChunkRecorders.values
+            .flatMap(\.completedChunks)
+            .sorted(by: { lhs, rhs in
+                if lhs.startedAt == rhs.startedAt {
+                    return lhs.id < rhs.id
+                }
+                return lhs.startedAt < rhs.startedAt
+            })
+    }
+
+    private func startObservingDeviceChanges() {
+        stopObservingDeviceChanges()
+
+        observerTokens.append(
+            notificationCenter.addObserver(
+                forName: AVCaptureDevice.wasDisconnectedNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let self, Self.notificationTargetsAudioDevice(notification) else {
+                    return
+                }
+
+                self.enqueueMicrophoneDegradedEvent(
+                    "A microphone device disconnected. Oatmeal is still saving the meeting audio locally and will recover your mic automatically if it comes back."
+                )
+            }
+        )
+    }
+
+    private func stopObservingDeviceChanges() {
+        observerTokens.forEach(notificationCenter.removeObserver)
+        observerTokens.removeAll()
+    }
+
+    private func startHealthMonitor() {
+        stopHealthMonitor()
+
+        let timer = DispatchSource.makeTimerSource(queue: sampleHandlerQueue)
+        timer.schedule(deadline: .now() + healthMonitorInterval, repeating: healthMonitorInterval)
+        timer.setEventHandler { [weak self] in
+            self?.evaluateSourceHealthHeartbeat()
+        }
+        healthMonitorTimer = timer
+        timer.resume()
+    }
+
+    private func stopHealthMonitor() {
+        healthMonitorTimer?.cancel()
+        healthMonitorTimer = nil
+    }
+
+    private func enqueueMicrophoneDegradedEvent(_ message: String) {
+        lock.withLock {
+            guard !microphoneInputIsDegraded else {
+                enqueueRuntimeEventLocked(kind: .degraded, source: .microphone, message: message)
+                return
+            }
+
+            microphoneInputIsDegraded = true
+            enqueueRuntimeEventLocked(
+                kind: .degraded,
+                source: .microphone,
+                message: message
+            )
+        }
+    }
+
+    private func enqueueSystemAudioDegradedEvent(_ message: String) {
+        lock.withLock {
+            guard !systemAudioInputIsDegraded else {
+                enqueueRuntimeEventLocked(kind: .degraded, source: .systemAudio, message: message)
+                return
+            }
+
+            systemAudioInputIsDegraded = true
+            enqueueRuntimeEventLocked(
+                kind: .degraded,
+                source: .systemAudio,
+                message: message
+            )
+        }
+    }
+
+    private func evaluateSourceHealthHeartbeat(referenceDate: Date = Date()) {
+        lock.withLock {
+            guard activeSessionStorage != nil else {
+                return
+            }
+
+            if let lastMicrophoneSampleAt,
+               referenceDate.timeIntervalSince(lastMicrophoneSampleAt) >= sourceHeartbeatTimeout,
+               !microphoneInputIsDegraded {
+                microphoneInputIsDegraded = true
+                enqueueRuntimeEventLocked(
+                    kind: .degraded,
+                    source: .microphone,
+                    message: "Microphone samples have paused. Oatmeal is still saving the meeting audio locally and will recover your voice feed when it resumes.",
+                    createdAt: referenceDate
+                )
+            }
+
+            if let lastSystemAudioSampleAt,
+               referenceDate.timeIntervalSince(lastSystemAudioSampleAt) >= sourceHeartbeatTimeout,
+               !systemAudioInputIsDegraded {
+                systemAudioInputIsDegraded = true
+                enqueueRuntimeEventLocked(
+                    kind: .degraded,
+                    source: .systemAudio,
+                    message: "System audio samples have paused. Oatmeal is still keeping the local recording safe and will recover the meeting feed when it resumes.",
+                    createdAt: referenceDate
+                )
+            }
+        }
+    }
+
+    private func enqueueRuntimeEventLocked(
+        kind: CaptureRuntimeEventKind,
+        source: CaptureRuntimeEventSource,
+        message: String,
+        createdAt: Date = Date()
+    ) {
+        if let lastEvent = runtimeEventsStorage.last,
+           lastEvent.kind == kind,
+           lastEvent.source == source,
+           lastEvent.message == message {
+            return
+        }
+
+        runtimeEventsStorage.append(
+            CaptureRuntimeEvent(
+                noteID: noteID,
+                kind: kind,
+                source: source,
+                message: message,
+                createdAt: createdAt
+            )
+        )
+    }
+
+    private func handleUnexpectedCaptureFailure(message: String, endedAt: Date = Date()) {
+        let shouldHandle = lock.withLock { () -> Bool in
+            let isUnexpected = activeSessionStorage != nil && startContinuation == nil && stopContinuation == nil
+            guard isUnexpected, !unexpectedFailureHandled else {
+                return false
+            }
+
+            unexpectedFailureHandled = true
+            return true
+        }
+
+        guard shouldHandle else {
+            return
+        }
+
+        stopObservingDeviceChanges()
+        stopHealthMonitor()
+        finishOpenLiveChunks(endedAt: endedAt)
+
+        lock.withLock {
+            pendingSession = nil
+            pendingArtifact = nil
+            activeSessionStorage = nil
+            stream = nil
+            recordingOutput = nil
+            liveChunkRecorders = [:]
+            microphoneInputIsDegraded = false
+            systemAudioInputIsDegraded = false
+            enqueueRuntimeEventLocked(
+                kind: .failed,
+                source: .capturePipeline,
+                message: message,
+                createdAt: endedAt
+            )
+        }
+    }
+
     private func resumeStart(with result: Result<ActiveCaptureSession, Error>) {
         let continuation = lock.withLock { () -> CheckedContinuation<ActiveCaptureSession, Error>? in
             defer { startContinuation = nil }
@@ -418,12 +1342,16 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
             lock.withLock {
                 pendingSession = nil
                 activeSessionStorage = session
+                unexpectedFailureHandled = false
             }
             continuation.resume(returning: session)
         case let .failure(error):
+            stopObservingDeviceChanges()
+            stopHealthMonitor()
             lock.withLock {
                 pendingSession = nil
                 activeSessionStorage = nil
+                unexpectedFailureHandled = false
             }
             continuation.resume(throwing: error)
         }
@@ -439,19 +1367,39 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
 
         switch result {
         case let .success(artifact):
+            stopObservingDeviceChanges()
+            stopHealthMonitor()
             lock.withLock {
                 pendingArtifact = nil
                 activeSessionStorage = nil
                 stream = nil
                 recordingOutput = nil
+                completedLiveChunksStorage = []
+                liveChunkRecorders = [:]
+                runtimeEventsStorage = []
+                microphoneInputIsDegraded = false
+                systemAudioInputIsDegraded = false
+                lastMicrophoneSampleAt = nil
+                lastSystemAudioSampleAt = nil
+                unexpectedFailureHandled = false
             }
             continuation.resume(returning: artifact)
         case let .failure(error):
+            stopObservingDeviceChanges()
+            stopHealthMonitor()
             lock.withLock {
                 pendingArtifact = nil
                 activeSessionStorage = nil
                 stream = nil
                 recordingOutput = nil
+                completedLiveChunksStorage = []
+                liveChunkRecorders = [:]
+                runtimeEventsStorage = []
+                microphoneInputIsDegraded = false
+                systemAudioInputIsDegraded = false
+                lastMicrophoneSampleAt = nil
+                lastSystemAudioSampleAt = nil
+                unexpectedFailureHandled = false
             }
             continuation.resume(throwing: error)
         }
@@ -464,9 +1412,17 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
     private static func preferredDisplay(from shareableContent: SCShareableContent) -> SCDisplay? {
         shareableContent.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? shareableContent.displays.first
     }
+
+    private static func notificationTargetsAudioDevice(_ notification: Notification) -> Bool {
+        guard let device = notification.object as? AVCaptureDevice else {
+            return false
+        }
+
+        return device.hasMediaType(.audio)
+    }
 }
 
-extension ScreenAudioCaptureRecorder: SCRecordingOutputDelegate, SCStreamDelegate {
+extension ScreenAudioCaptureRecorder: SCRecordingOutputDelegate, SCStreamDelegate, SCStreamOutput {
     nonisolated func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
         let session = lock.withLock { pendingSession }
         guard let session else { return }
@@ -477,11 +1433,16 @@ extension ScreenAudioCaptureRecorder: SCRecordingOutputDelegate, SCStreamDelegat
 
     nonisolated func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
         let shouldResumeStart = lock.withLock { startContinuation != nil }
+        let shouldResumeStop = lock.withLock { stopContinuation != nil }
         Task { @MainActor [weak self] in
             if shouldResumeStart {
                 self?.resumeStart(with: .failure(error))
-            } else {
+            } else if shouldResumeStop {
                 self?.resumeStop(with: .failure(error))
+            } else {
+                self?.handleUnexpectedCaptureFailure(
+                    message: "Screen and system audio capture stopped unexpectedly. Oatmeal kept the partial local recording artifacts that were already saved, and will salvage the note in the background."
+                )
             }
         }
     }
@@ -489,6 +1450,7 @@ extension ScreenAudioCaptureRecorder: SCRecordingOutputDelegate, SCStreamDelegat
     nonisolated func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
         let artifact = lock.withLock { pendingArtifact }
         guard let artifact else { return }
+        finishOpenLiveChunks(endedAt: artifact.endedAt)
         Task { @MainActor [weak self] in
             self?.resumeStop(with: .success(artifact))
         }
@@ -496,12 +1458,32 @@ extension ScreenAudioCaptureRecorder: SCRecordingOutputDelegate, SCStreamDelegat
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         let shouldResumeStart = lock.withLock { startContinuation != nil }
+        let shouldResumeStop = lock.withLock { stopContinuation != nil }
         Task { @MainActor [weak self] in
             if shouldResumeStart {
                 self?.resumeStart(with: .failure(error))
-            } else {
+            } else if shouldResumeStop {
                 self?.resumeStop(with: .failure(error))
+            } else {
+                self?.handleUnexpectedCaptureFailure(
+                    message: "Live screen and system audio capture was interrupted. Oatmeal kept the locally saved portion of the recording and will finish whatever it can in the background."
+                )
             }
+        }
+    }
+
+    nonisolated func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        switch type {
+        case .audio:
+            appendLiveSampleBuffer(sampleBuffer, source: .systemAudio)
+        case .microphone:
+            appendLiveSampleBuffer(sampleBuffer, source: .microphone)
+        default:
+            break
         }
     }
 }

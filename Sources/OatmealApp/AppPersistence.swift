@@ -6,15 +6,18 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     var notes: [MeetingNote]
     var selectedTemplateID: UUID?
     var transcriptionConfiguration: LocalTranscriptionConfiguration
+    var summaryConfiguration: LocalSummaryConfiguration
 
     init(
         notes: [MeetingNote] = [],
         selectedTemplateID: UUID? = nil,
-        transcriptionConfiguration: LocalTranscriptionConfiguration = .default
+        transcriptionConfiguration: LocalTranscriptionConfiguration = .default,
+        summaryConfiguration: LocalSummaryConfiguration = .default
     ) {
         self.notes = notes
         self.selectedTemplateID = selectedTemplateID
         self.transcriptionConfiguration = transcriptionConfiguration
+        self.summaryConfiguration = summaryConfiguration
     }
 
     static let empty = AppPersistenceSnapshot()
@@ -23,6 +26,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         case notes
         case selectedTemplateID
         case transcriptionConfiguration
+        case summaryConfiguration
     }
 
     init(from decoder: Decoder) throws {
@@ -33,6 +37,10 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
             LocalTranscriptionConfiguration.self,
             forKey: .transcriptionConfiguration
         ) ?? .default
+        summaryConfiguration = try container.decodeIfPresent(
+            LocalSummaryConfiguration.self,
+            forKey: .summaryConfiguration
+        ) ?? .default
     }
 
     func encode(to encoder: Encoder) throws {
@@ -40,6 +48,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         try container.encode(notes, forKey: .notes)
         try container.encodeIfPresent(selectedTemplateID, forKey: .selectedTemplateID)
         try container.encode(transcriptionConfiguration, forKey: .transcriptionConfiguration)
+        try container.encode(summaryConfiguration, forKey: .summaryConfiguration)
     }
 }
 
@@ -105,13 +114,15 @@ final class AppPersistence: @unchecked Sendable {
     func save(
         notes: [MeetingNote],
         selectedTemplateID: UUID?,
-        transcriptionConfiguration: LocalTranscriptionConfiguration
+        transcriptionConfiguration: LocalTranscriptionConfiguration,
+        summaryConfiguration: LocalSummaryConfiguration
     ) throws {
         try save(
             AppPersistenceSnapshot(
                 notes: notes,
                 selectedTemplateID: selectedTemplateID,
-                transcriptionConfiguration: transcriptionConfiguration
+                transcriptionConfiguration: transcriptionConfiguration,
+                summaryConfiguration: summaryConfiguration
             )
         )
     }

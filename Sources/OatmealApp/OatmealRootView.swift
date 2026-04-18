@@ -137,7 +137,16 @@ struct OatmealRootView: View {
                     capturePermissionMessage: model.capturePermissionMessage,
                     recordingURL: model.recordingURL(for: note),
                     transcriptionConfiguration: model.transcriptionConfiguration,
-                    transcriptionPlanSummary: model.transcriptionRuntimeState?.activePlanSummary
+                    transcriptionPlanSummary: model.transcriptionRuntimeState?.activePlanSummary,
+                    summaryConfiguration: model.summaryConfiguration,
+                    summaryPlanSummary: model.summaryPlanSummary(for: note),
+                    summaryExecutionPlan: model.summaryExecutionPlan(for: note),
+                    isLiveTranscriptPanelPresented: note.liveSessionState.isTranscriptPanelPresented,
+                    canRetryTranscription: model.canRetryTranscription(for: note),
+                    canRetryGeneration: model.canRetryGeneration(for: note),
+                    setLiveTranscriptPanelPresented: { model.setLiveTranscriptPanelPresented($0, for: note.id) },
+                    retryTranscription: { model.retryTranscription() },
+                    retryGeneration: { model.retryGeneration() }
                 )
             } else {
                 ContentUnavailableView(
@@ -603,6 +612,24 @@ private struct MeetingDetailView: View {
     let recordingURL: URL?
     let transcriptionConfiguration: LocalTranscriptionConfiguration
     let transcriptionPlanSummary: String?
+    let summaryConfiguration: LocalSummaryConfiguration
+    let summaryPlanSummary: String?
+    let summaryExecutionPlan: LocalSummaryExecutionPlan?
+    let isLiveTranscriptPanelPresented: Bool
+    let canRetryTranscription: Bool
+    let canRetryGeneration: Bool
+    let setLiveTranscriptPanelPresented: (Bool) -> Void
+    let retryTranscription: () -> Void
+    let retryGeneration: () -> Void
+    @State private var isLiveTranscriptPanelExpanded = false
+
+    private var liveTranscriptPanelState: LiveTranscriptPanelState? {
+        LiveTranscriptPanelAdapter.panelState(for: note)
+    }
+
+    private var shouldShowLiveTranscriptPanel: Bool {
+        isLiveTranscriptPanelExpanded || isLiveTranscriptPanelPresented
+    }
 
     var body: some View {
         ScrollView {
@@ -611,15 +638,40 @@ private struct MeetingDetailView: View {
                 summaryCards
                 metadataSection
                 captureSection
+                if let liveTranscriptPanelState {
+                    if shouldShowLiveTranscriptPanel {
+                        liveTranscriptSection(liveTranscriptPanelState)
+                    } else {
+                        liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                    }
+                }
                 processingSection
                 transcriptionSection
+                summaryRuntimeSection
                 rawNotesSection
-                transcriptSection
+                if liveTranscriptPanelState == nil {
+                    transcriptSection
+                }
             }
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onAppear {
+            isLiveTranscriptPanelExpanded = isLiveTranscriptPanelPresented
+        }
+        .onChange(of: note.id) { _, _ in
+            isLiveTranscriptPanelExpanded = note.liveSessionState.isTranscriptPanelPresented
+        }
+        .onChange(of: isLiveTranscriptPanelPresented) { _, newValue in
+            isLiveTranscriptPanelExpanded = newValue
+        }
+        .onChange(of: isLiveTranscriptPanelExpanded) { _, newValue in
+            guard newValue != note.liveSessionState.isTranscriptPanelPresented else {
+                return
+            }
+            setLiveTranscriptPanelPresented(newValue)
+        }
     }
 
     private var header: some View {
@@ -717,6 +769,7 @@ private struct MeetingDetailView: View {
                 LabeledContent("Pipeline state", value: processingStatusSummary)
                 LabeledContent("Transcription status", value: note.transcriptionStatus.displayLabel)
                 LabeledContent("Generation status", value: note.generationStatus.displayLabel)
+                LabeledContent("Summary runtime", value: summaryExecutionPlan?.backend.displayName ?? summaryConfiguration.preferredBackend.displayName)
             }
         }
     }
@@ -800,6 +853,66 @@ private struct MeetingDetailView: View {
 
                 Text(processingFootnote)
                     .foregroundStyle(.secondary)
+
+                if canRetryTranscription || canRetryGeneration {
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        if canRetryTranscription {
+                            Button("Retry Transcription") {
+                                retryTranscription()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+
+                        if canRetryGeneration {
+                            Button("Retry Enhanced Note") {
+                                retryGeneration()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var summaryRuntimeSection: some View {
+        DetailCard(title: "Summary Runtime") {
+            VStack(alignment: .leading, spacing: 12) {
+                LabeledContent("Preferred backend", value: summaryConfiguration.preferredBackend.displayName)
+                LabeledContent("Execution policy", value: summaryConfiguration.executionPolicy.displayName)
+
+                if let summaryExecutionPlan {
+                    LabeledContent("Planned backend", value: summaryExecutionPlan.backend.displayName)
+                    LabeledContent("Execution kind", value: summaryExecutionPlan.executionKind.rawValue.capitalized)
+                    Text(summaryExecutionPlan.summary)
+                        .foregroundStyle(.secondary)
+
+                    if !summaryExecutionPlan.warningMessages.isEmpty {
+                        Text(summaryExecutionPlan.warningMessages.joined(separator: " "))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let summaryPlanSummary {
+                    Text(summaryPlanSummary)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No summary runtime plan has been prepared for this note yet.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let lastAttempt = note.generationHistory.last {
+                    LabeledContent("Last request", value: processingTimestamp(lastAttempt.requestedAt))
+
+                    if let completedAt = lastAttempt.completedAt {
+                        LabeledContent("Last completion", value: processingTimestamp(completedAt))
+                    }
+
+                    if let errorMessage = lastAttempt.errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
     }
@@ -815,6 +928,137 @@ private struct MeetingDetailView: View {
                     .frame(minHeight: 180)
             }
         }
+    }
+
+    private func liveTranscriptSection(_ panelState: LiveTranscriptPanelState) -> some View {
+        DetailCard(title: "Live Transcript") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    liveTranscriptStatusSummary(panelState)
+
+                    Spacer()
+
+                    Button("Hide Panel") {
+                        isLiveTranscriptPanelExpanded = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                DisclosureGroup(isExpanded: $isLiveTranscriptPanelExpanded) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if panelState.lines.isEmpty {
+                            Text(panelState.placeholderText)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(panelState.lines) { line in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    if let lineHeader = line.headerText {
+                                        Text(lineHeader)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text(line.text)
+                                }
+                                .padding(.bottom, 4)
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text(panelState.lines.isEmpty ? "Waiting for live updates" : "Live transcript preview")
+                        .font(.headline)
+                }
+            }
+        }
+    }
+
+    private func liveTranscriptEntryPointSection(_ panelState: LiveTranscriptPanelState) -> some View {
+        DetailCard(title: "Live Transcript") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    liveTranscriptStatusSummary(panelState)
+
+                    Spacer()
+
+                    Button("Open Panel") {
+                        isLiveTranscriptPanelExpanded = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+
+                Text(liveTranscriptEntryPointText(for: panelState))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func liveTranscriptStatusSummary(_ panelState: LiveTranscriptPanelState) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                LiveTranscriptStatusBadge(
+                    title: "Session Health",
+                    value: panelState.healthLabel,
+                    color: panelState.healthColor
+                )
+
+                LiveTranscriptStatusBadge(
+                    title: "Capture",
+                    value: panelState.captureLabel,
+                    color: captureBadgeColor(for: panelState.captureLabel)
+                )
+
+                if panelState.usesPersistedSessionState {
+                    LiveTranscriptStatusBadge(
+                        title: "Storage",
+                        value: "Saved Locally",
+                        color: .blue
+                    )
+                }
+            }
+
+            if !panelState.sourceBadges.isEmpty {
+                FlexibleBadgeRow(badges: panelState.sourceBadges)
+            }
+
+            if !panelState.metricBadges.isEmpty {
+                FlexibleBadgeRow(badges: panelState.metricBadges)
+            }
+
+            Text(panelState.detailText)
+                .foregroundStyle(.secondary)
+
+            if let lastUpdatedText = panelState.lastUpdatedText {
+                Text("Last event: \(lastUpdatedText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func captureBadgeColor(for captureLabel: String) -> Color {
+        switch captureLabel.lowercased() {
+        case "recording":
+            .green
+        case "paused":
+            .orange
+        case "interrupted":
+            .pink
+        default:
+            .secondary
+        }
+    }
+
+    private func liveTranscriptEntryPointText(for panelState: LiveTranscriptPanelState) -> String {
+        if let latestLine = panelState.lines.last?.text.nilIfBlank {
+            let count = panelState.lines.count
+            let noun = count == 1 ? "update" : "updates"
+            return "Oatmeal has already staged \(count) live transcript \(noun). Open the panel to inspect the latest chunk: \(latestLine)"
+        }
+
+        return panelState.placeholderText
     }
 
     private var transcriptSection: some View {
@@ -962,18 +1206,6 @@ private struct MeetingDetailView: View {
                 errorMessage: lastAttempt?.errorMessage
             )
         case .idle:
-            if transcriptCount > 0 {
-                return ProcessingJobRowModel(
-                    id: "transcription",
-                    title: "Transcription",
-                    detail: lastAttempt.map { "\($0.backend.displayLabel) • \($0.executionKind.displayLabel)" } ?? "Transcript is already attached to this note.",
-                    secondaryDetail: lastAttempt.map { completedAttemptSummary(requestedAt: $0.requestedAt, completedAt: $0.completedAt, resultSummary: $0.segmentCount == 0 ? transcriptSummary : segmentSummary(for: $0.segmentCount)) } ?? transcriptSummary,
-                    state: .completed,
-                    warningMessages: lastAttempt?.warningMessages ?? [],
-                    errorMessage: nil
-                )
-            }
-
             if note.processingState.stage == .transcription, note.processingState.status == .queued {
                 return ProcessingJobRowModel(
                     id: "transcription",
@@ -994,6 +1226,18 @@ private struct MeetingDetailView: View {
                     secondaryDetail: note.processingState.startedAt.map { "Started \(processingTimestamp($0))" },
                     state: .running,
                     warningMessages: [],
+                    errorMessage: nil
+                )
+            }
+
+            if transcriptCount > 0 {
+                return ProcessingJobRowModel(
+                    id: "transcription",
+                    title: "Transcription",
+                    detail: lastAttempt.map { "\($0.backend.displayLabel) • \($0.executionKind.displayLabel)" } ?? "Transcript is already attached to this note.",
+                    secondaryDetail: lastAttempt.map { completedAttemptSummary(requestedAt: $0.requestedAt, completedAt: $0.completedAt, resultSummary: $0.segmentCount == 0 ? transcriptSummary : segmentSummary(for: $0.segmentCount)) } ?? transcriptSummary,
+                    state: .completed,
+                    warningMessages: lastAttempt?.warningMessages ?? [],
                     errorMessage: nil
                 )
             }
@@ -1025,16 +1269,19 @@ private struct MeetingDetailView: View {
     private var generationProcessingRow: ProcessingJobRowModel {
         let lastAttempt = note.generationHistory.last
         let templateSummary = "Template: \(template?.name ?? "Automatic")"
+        let runtimeSummary = summaryExecutionPlan.map {
+            "\($0.backend.displayName) • \($0.executionKind.rawValue.capitalized)"
+        } ?? summaryPlanSummary
 
         switch note.generationStatus {
         case .pending:
             return ProcessingJobRowModel(
                 id: "generation",
                 title: "Enhanced Note",
-                detail: "Building the structured note from the transcript, raw notes, and template context.",
+                detail: runtimeSummary ?? "Building the structured note from the transcript, raw notes, and template context.",
                 secondaryDetail: lastAttempt.map { "Started \(processingTimestamp($0.requestedAt)) • \(templateSummary)" } ?? templateSummary,
                 state: .running,
-                warningMessages: [],
+                warningMessages: summaryExecutionPlan?.warningMessages ?? [],
                 errorMessage: lastAttempt?.errorMessage
             )
         case .succeeded:
@@ -1058,6 +1305,30 @@ private struct MeetingDetailView: View {
                 errorMessage: lastAttempt?.errorMessage
             )
         case .idle:
+            if note.processingState.stage == .generation, note.processingState.status == .queued {
+                return ProcessingJobRowModel(
+                    id: "generation",
+                    title: "Enhanced Note",
+                    detail: runtimeSummary ?? "Enhanced note generation is queued next.",
+                    secondaryDetail: templateSummary,
+                    state: .queued,
+                    warningMessages: summaryExecutionPlan?.warningMessages ?? [],
+                    errorMessage: nil
+                )
+            }
+
+            if note.processingState.stage == .generation, note.processingState.status == .running {
+                return ProcessingJobRowModel(
+                    id: "generation",
+                    title: "Enhanced Note",
+                    detail: runtimeSummary ?? "Building the structured note from the transcript, raw notes, and template context.",
+                    secondaryDetail: note.processingState.startedAt.map { "Started \(processingTimestamp($0)) • \(templateSummary)" } ?? templateSummary,
+                    state: .running,
+                    warningMessages: summaryExecutionPlan?.warningMessages ?? [],
+                    errorMessage: nil
+                )
+            }
+
             if note.enhancedNote != nil {
                 return ProcessingJobRowModel(
                     id: "generation",
@@ -1070,38 +1341,14 @@ private struct MeetingDetailView: View {
                 )
             }
 
-            if note.processingState.stage == .generation, note.processingState.status == .queued {
-                return ProcessingJobRowModel(
-                    id: "generation",
-                    title: "Enhanced Note",
-                    detail: "Enhanced note generation is queued next.",
-                    secondaryDetail: templateSummary,
-                    state: .queued,
-                    warningMessages: [],
-                    errorMessage: nil
-                )
-            }
-
-            if note.processingState.stage == .generation, note.processingState.status == .running {
-                return ProcessingJobRowModel(
-                    id: "generation",
-                    title: "Enhanced Note",
-                    detail: "Building the structured note from the transcript, raw notes, and template context.",
-                    secondaryDetail: note.processingState.startedAt.map { "Started \(processingTimestamp($0)) • \(templateSummary)" } ?? templateSummary,
-                    state: .running,
-                    warningMessages: [],
-                    errorMessage: nil
-                )
-            }
-
             if note.transcriptionStatus == .succeeded || !note.transcriptSegments.isEmpty {
                 return ProcessingJobRowModel(
                     id: "generation",
                     title: "Enhanced Note",
-                    detail: "Transcript is ready. Enhanced note generation is queued next.",
+                    detail: runtimeSummary ?? "Transcript is ready. Enhanced note generation is queued next.",
                     secondaryDetail: templateSummary,
                     state: .queued,
-                    warningMessages: [],
+                    warningMessages: summaryExecutionPlan?.warningMessages ?? [],
                     errorMessage: nil
                 )
             }
@@ -1175,6 +1422,760 @@ private struct MeetingDetailView: View {
 
     private func segmentSummary(for count: Int) -> String {
         count == 1 ? "1 segment ready" : "\(count) segments ready"
+    }
+}
+
+struct LiveTranscriptPanelState: Equatable, Sendable {
+    enum HealthTone: Equatable, Sendable {
+        case live
+        case delayed
+        case recovered
+        case failed
+    }
+
+    struct Line: Equatable, Sendable, Identifiable {
+        let id: String
+        let kind: LiveTranscriptEntryKind
+        let speakerName: String?
+        let timestampText: String?
+        let text: String
+
+        var headerText: String? {
+            let source = kind == .system ? "Oatmeal" : speakerName?.nilIfBlank
+            let parts = [source, timestampText?.nilIfBlank].compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: " • ")
+        }
+    }
+
+    struct SourceBadge: Equatable, Sendable, Identifiable {
+        let id: String
+        let title: String
+        let value: String
+        let detailText: String?
+        let tone: HealthTone
+    }
+
+    let healthLabel: String
+    let captureLabel: String
+    let healthTone: HealthTone
+    let detailText: String
+    let placeholderText: String
+    let lines: [Line]
+    let sourceBadges: [SourceBadge]
+    let metricBadges: [SourceBadge]
+    let usesPersistedSessionState: Bool
+    let isPresented: Bool
+    let showsPersistenceBadge: Bool
+    let lastUpdatedText: String?
+
+    var healthColor: Color {
+        switch healthTone {
+        case .live:
+            .green
+        case .delayed:
+            .orange
+        case .recovered:
+            .blue
+        case .failed:
+            .pink
+        }
+    }
+}
+
+private struct FlexibleBadgeRow: View {
+    let badges: [LiveTranscriptPanelState.SourceBadge]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(badges) { badge in
+                HStack(spacing: 8) {
+                    LiveTranscriptStatusBadge(
+                        title: badge.title,
+                        value: badge.value,
+                        color: color(for: badge.tone)
+                    )
+
+                    if let detailText = badge.detailText?.nilIfBlank {
+                        Text(detailText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+        }
+    }
+
+    private func color(for tone: LiveTranscriptPanelState.HealthTone) -> Color {
+        switch tone {
+        case .live:
+            .green
+        case .delayed:
+            .orange
+        case .recovered:
+            .blue
+        case .failed:
+            .pink
+        }
+    }
+}
+
+enum LiveTranscriptPanelAdapter {
+    static func panelState(for note: MeetingNote) -> LiveTranscriptPanelState? {
+        let liveSessionState = note.liveSessionState
+        let shouldExposePanel = note.captureState.isActive
+            || liveSessionState.isTranscriptPanelPresented
+            || liveSessionStatusesThatExposePanel.contains(liveSessionState.status)
+        guard shouldExposePanel else {
+            return nil
+        }
+
+        return LiveTranscriptPanelState(
+            healthLabel: liveSessionState.status.displayLabel,
+            captureLabel: captureLabel(for: note.captureState),
+            healthTone: tone(for: liveSessionState.status),
+            detailText: liveSessionState.statusMessage?.nilIfBlank ?? fallbackDetailText(for: liveSessionState),
+            placeholderText: fallbackPlaceholderText(for: liveSessionState),
+            lines: liveSessionState.previewEntries.map(line(from:)),
+            sourceBadges: sourceBadges(for: note),
+            metricBadges: metricBadges(for: note),
+            usesPersistedSessionState: true,
+            isPresented: liveSessionState.isTranscriptPanelPresented,
+            showsPersistenceBadge: liveSessionState.status != .idle,
+            lastUpdatedText: liveSessionState.lastUpdatedAt?.formatted(date: .omitted, time: .shortened)
+        )
+    }
+
+    static func reflectedSession(from value: Any) -> ReflectedLiveSessionState? {
+        let mirror = Mirror(reflecting: value)
+        let candidateLabels = [
+            "liveSessionState",
+            "liveSession",
+            "activeLiveSession",
+            "persistedLiveSessionState"
+        ]
+
+        for label in candidateLabels {
+            if let candidate = mirror.descendant(label),
+               let snapshot = makeReflectedSession(from: candidate) {
+                return snapshot
+            }
+        }
+
+        let typeName = normalize(label: String(describing: mirror.subjectType))
+        guard typeName.contains("livesession") else {
+            return nil
+        }
+
+        return makeReflectedSession(from: value)
+    }
+
+    private static func makeReflectedSession(from value: Any) -> ReflectedLiveSessionState? {
+        let lines = reflectedLines(in: value)
+        let healthLabel = reflectedHealthLabel(in: value)
+        let detailText = reflectedString(
+            in: value,
+            labels: ["detailText", "statusDetail", "statusMessage", "summary", "panelSummary", "recoverySummary", "detail"]
+        )
+        let isRecovered = reflectedBool(
+            in: value,
+            labels: ["isRecovered", "recoveredAfterRelaunch", "didRecover"]
+        ) ?? false
+        let isDelayed = reflectedBool(
+            in: value,
+            labels: ["isDelayed", "isCatchingUp", "isLaggingBehind", "hasBacklog"]
+        ) ?? false
+        let isActive = reflectedBool(
+            in: value,
+            labels: ["isActive", "isRunning", "captureIsActive", "isCapturing"]
+        ) ?? reflectedRawValue(
+            in: value,
+            labels: ["phase", "status", "state"]
+        ).map { activeStateLabels.contains(normalize(label: $0)) } ?? false
+
+        let resolvedHealthLabel = healthLabel
+            ?? {
+                if isRecovered {
+                    return "Recovered"
+                }
+                if isDelayed {
+                    return "Delayed"
+                }
+                if isActive || !lines.isEmpty {
+                    return "Live"
+                }
+                return nil
+            }()
+
+        guard resolvedHealthLabel != nil || !lines.isEmpty || detailText != nil else {
+            return nil
+        }
+
+        return ReflectedLiveSessionState(
+            healthLabel: resolvedHealthLabel ?? "Live",
+            detailText: detailText,
+            placeholderText: reflectedString(
+                in: value,
+                labels: ["placeholderText", "emptyTranscriptMessage", "emptyStateMessage"]
+            ),
+            lines: lines
+        )
+    }
+
+    private static func reflectedHealthLabel(in value: Any) -> String? {
+        if let label = reflectedString(
+            in: value,
+            labels: ["healthLabel", "displayLabel", "sessionHealthLabel", "statusLabel"]
+        ) {
+            return titleCaseHealthLabel(label)
+        }
+
+        if let rawValue = reflectedRawValue(
+            in: value,
+            labels: ["health", "sessionHealth", "liveHealth", "status", "state"]
+        ) {
+            return titleCaseHealthLabel(rawValue)
+        }
+
+        return nil
+    }
+
+    private static func reflectedLines(in value: Any) -> [LiveTranscriptPanelState.Line] {
+        let collectionLabels = [
+            "transcriptSegments",
+            "segments",
+            "incrementalSegments",
+            "entries",
+            "previewEntries",
+            "transcriptEntries",
+            "transcriptLines",
+            "mergedTranscriptSegments"
+        ]
+
+        for label in collectionLabels {
+            if let candidate = Mirror(reflecting: value).descendant(label) {
+                let lines = makeLines(fromCollection: candidate)
+                if !lines.isEmpty {
+                    return lines
+                }
+            }
+        }
+
+        return []
+    }
+
+    private static func makeLines(fromCollection value: Any) -> [LiveTranscriptPanelState.Line] {
+        if let entries = value as? [LiveTranscriptEntry] {
+            return entries.map(line(from:))
+        }
+
+        if let segments = value as? [TranscriptSegment] {
+            return segments.map(line(from:))
+        }
+
+        if let entries = value as? [String] {
+            return entries.enumerated().compactMap { index, entry -> LiveTranscriptPanelState.Line? in
+                let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else {
+                    return nil
+                }
+                return LiveTranscriptPanelState.Line(
+                    id: "string-\(index)",
+                    kind: .transcript,
+                    speakerName: nil,
+                    timestampText: nil,
+                    text: trimmed
+                )
+            }
+        }
+
+        return Mirror(reflecting: value).children.enumerated().compactMap { index, child in
+            line(from: child.value, fallbackID: "reflected-\(index)")
+        }
+    }
+
+    private static func line(from entry: LiveTranscriptEntry) -> LiveTranscriptPanelState.Line {
+        LiveTranscriptPanelState.Line(
+            id: entry.id.uuidString,
+            kind: entry.kind,
+            speakerName: entry.speakerName,
+            timestampText: entry.createdAt.formatted(date: .omitted, time: .shortened),
+            text: entry.text
+        )
+    }
+
+    private static func line(from segment: TranscriptSegment) -> LiveTranscriptPanelState.Line {
+        LiveTranscriptPanelState.Line(
+            id: segment.id.uuidString,
+            kind: .transcript,
+            speakerName: segment.speakerName,
+            timestampText: segment.startTime?.formatted(date: .omitted, time: .shortened),
+            text: segment.text
+        )
+    }
+
+    private static func line(from value: Any, fallbackID: String) -> LiveTranscriptPanelState.Line? {
+        if let entry = value as? LiveTranscriptEntry {
+            return line(from: entry)
+        }
+
+        if let segment = value as? TranscriptSegment {
+            return line(from: segment)
+        }
+
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return nil
+            }
+            return LiveTranscriptPanelState.Line(
+                id: fallbackID,
+                kind: .transcript,
+                speakerName: nil,
+                timestampText: nil,
+                text: trimmed
+            )
+        }
+
+        let text = reflectedString(in: value, labels: ["text", "content", "displayText", "excerpt"])
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let speakerName = reflectedString(in: value, labels: ["speakerName", "speaker"])
+        let timestamp = reflectedDate(
+            in: value,
+            labels: ["startTime", "timestamp", "capturedAt", "createdAt"]
+        )?.formatted(date: .omitted, time: .shortened)
+
+        return LiveTranscriptPanelState.Line(
+            id: reflectedString(in: value, labels: ["id"]) ?? fallbackID,
+            kind: reflectedRawValue(in: value, labels: ["kind"]) == LiveTranscriptEntryKind.system.rawValue ? .system : .transcript,
+            speakerName: speakerName,
+            timestampText: timestamp,
+            text: text
+        )
+    }
+
+    private static func reflectedString(in value: Any, labels: [String]) -> String? {
+        let normalizedLabels = Set(labels.map(normalize(label:)))
+        for child in Mirror(reflecting: value).children {
+            guard let label = child.label, normalizedLabels.contains(normalize(label: label)) else {
+                continue
+            }
+
+            let candidateValue = unwrapped(child.value) ?? child.value
+            if let string = candidateValue as? String {
+                return string.nilIfBlank
+            }
+        }
+
+        return nil
+    }
+
+    private static func reflectedBool(in value: Any, labels: [String]) -> Bool? {
+        let normalizedLabels = Set(labels.map(normalize(label:)))
+        for child in Mirror(reflecting: value).children {
+            guard let label = child.label, normalizedLabels.contains(normalize(label: label)) else {
+                continue
+            }
+
+            let candidateValue = unwrapped(child.value) ?? child.value
+            if let boolValue = candidateValue as? Bool {
+                return boolValue
+            }
+        }
+
+        return nil
+    }
+
+    private static func reflectedDate(in value: Any, labels: [String]) -> Date? {
+        let normalizedLabels = Set(labels.map(normalize(label:)))
+        for child in Mirror(reflecting: value).children {
+            guard let label = child.label, normalizedLabels.contains(normalize(label: label)) else {
+                continue
+            }
+
+            let candidateValue = unwrapped(child.value) ?? child.value
+            if let dateValue = candidateValue as? Date {
+                return dateValue
+            }
+        }
+
+        return nil
+    }
+
+    private static func reflectedRawValue(in value: Any, labels: [String]) -> String? {
+        let normalizedLabels = Set(labels.map(normalize(label:)))
+        for child in Mirror(reflecting: value).children {
+            guard let label = child.label, normalizedLabels.contains(normalize(label: label)) else {
+                continue
+            }
+
+            let candidateValue = unwrapped(child.value) ?? child.value
+            if let stringValue = candidateValue as? String {
+                return stringValue.nilIfBlank
+            }
+
+            let rawValueMirror = Mirror(reflecting: candidateValue)
+            if let rawValueChild = rawValueMirror.children.first(where: { $0.label == "rawValue" }),
+               let rawString = rawValueChild.value as? String {
+                return rawString.nilIfBlank
+            }
+        }
+
+        return nil
+    }
+
+    private static func fallbackDetailText(for liveSessionState: LiveSessionState) -> String {
+        switch liveSessionState.status {
+        case .live:
+            return "Oatmeal is listening locally and saving session progress so this panel can recover after a relaunch."
+        case .delayed:
+            return "Capture is still running. Oatmeal is catching up on transcript work in the background."
+        case .recovered:
+            return "Oatmeal restored this live session after relaunch and is preserving the recovered timeline here."
+        case .failed:
+            return "Live transcript updates are paused until session health recovers."
+        case .completed:
+            return "Recording stopped. Oatmeal will finish the durable transcript and enhanced note in the background."
+        case .idle:
+            return "Open this panel during an active meeting to monitor live transcript progress."
+        }
+    }
+
+    private static func fallbackPlaceholderText(for liveSessionState: LiveSessionState) -> String {
+        switch liveSessionState.status {
+        case .live:
+            return "Incremental transcript updates will appear here as Oatmeal saves live preview entries."
+        case .delayed:
+            return "Oatmeal is still recording and will fill in live transcript updates as it catches up."
+        case .recovered:
+            return "Recovered transcript updates will appear here as the session reconciles after relaunch."
+        case .failed:
+            return "Live transcript updates are unavailable until session health improves."
+        case .completed:
+            return "Capture is finished. The durable transcript will continue updating in the background."
+        case .idle:
+            return "Open this panel during an active meeting to watch live transcript updates."
+        }
+    }
+
+    private static func fallbackHealthLabel(for note: MeetingNote) -> String {
+        switch note.captureState.phase {
+        case .capturing:
+            return "Live"
+        case .paused:
+            return "Delayed"
+        case .failed:
+            return note.captureState.canResumeAfterCrash ? "Recovered" : "Delayed"
+        case .ready, .complete:
+            return "Live"
+        }
+    }
+
+    private static func captureLabel(for captureState: CaptureSessionState) -> String {
+        switch captureState.phase {
+        case .capturing:
+            return "Recording"
+        case .paused:
+            return "Paused"
+        case .failed:
+            return "Interrupted"
+        case .complete:
+            return "Stopped"
+        case .ready:
+            return "Ready"
+        }
+    }
+
+    private static func sourceBadges(for note: MeetingNote) -> [LiveTranscriptPanelState.SourceBadge] {
+        var badges: [LiveTranscriptPanelState.SourceBadge] = [
+            LiveTranscriptPanelState.SourceBadge(
+                id: LiveCaptureSourceID.microphone.rawValue,
+                title: LiveCaptureSourceID.microphone.displayLabel,
+                value: note.liveSessionState.microphoneSource.status.displayLabel,
+                detailText: sourceDetailText(
+                    message: note.liveSessionState.microphoneSource.statusMessage,
+                    lastActivityAt: note.liveSessionState.metrics.microphoneLastActivityAt
+                ),
+                tone: tone(for: note.liveSessionState.microphoneSource.status)
+            )
+        ]
+
+        if note.liveSessionState.systemAudioSource.status != .notRequired {
+            badges.append(
+                LiveTranscriptPanelState.SourceBadge(
+                    id: LiveCaptureSourceID.systemAudio.rawValue,
+                    title: LiveCaptureSourceID.systemAudio.displayLabel,
+                    value: note.liveSessionState.systemAudioSource.status.displayLabel,
+                    detailText: sourceDetailText(
+                        message: note.liveSessionState.systemAudioSource.statusMessage,
+                        lastActivityAt: note.liveSessionState.metrics.systemAudioLastActivityAt
+                    ),
+                    tone: tone(for: note.liveSessionState.systemAudioSource.status)
+                )
+            )
+        }
+
+        return badges
+    }
+
+    private static func metricBadges(for note: MeetingNote) -> [LiveTranscriptPanelState.SourceBadge] {
+        let metrics = note.liveSessionState.metrics
+        var badges: [LiveTranscriptPanelState.SourceBadge] = []
+
+        if note.captureState.isActive || metrics.pendingChunkCount > 0 || metrics.peakPendingChunkCount > 0 {
+            let backlogValue: String = if metrics.pendingChunkCount == 0 {
+                "Clear"
+            } else if metrics.pendingChunkCount == 1 {
+                "1 Chunk"
+            } else {
+                "\(metrics.pendingChunkCount) Chunks"
+            }
+
+            badges.append(
+                LiveTranscriptPanelState.SourceBadge(
+                    id: "metrics-backlog",
+                    title: "Backlog",
+                    value: backlogValue,
+                    detailText: backlogDetailText(for: metrics),
+                    tone: metrics.pendingChunkCount > 0 ? .delayed : .live
+                )
+            )
+        }
+
+        if metrics.recoveryCount > 0 || metrics.interruptionCount > 0 {
+            badges.append(
+                LiveTranscriptPanelState.SourceBadge(
+                    id: "metrics-recoveries",
+                    title: "Recoveries",
+                    value: "\(metrics.recoveryCount)",
+                    detailText: "Automatic capture recoveries in this session.",
+                    tone: metrics.recoveryCount > 0 ? .recovered : .live
+                )
+            )
+
+            badges.append(
+                LiveTranscriptPanelState.SourceBadge(
+                    id: "metrics-interruptions",
+                    title: "Interruptions",
+                    value: "\(metrics.interruptionCount)",
+                    detailText: "Source pauses or failures Oatmeal absorbed.",
+                    tone: metrics.interruptionCount > 0 ? .delayed : .live
+                )
+            )
+        }
+
+        if let lastMergedLiveChunkAt = metrics.lastMergedLiveChunkAt {
+            badges.append(
+                LiveTranscriptPanelState.SourceBadge(
+                    id: "metrics-last-merge",
+                    title: "Last Merge",
+                    value: lastMergedLiveChunkAt.formatted(date: .omitted, time: .shortened),
+                    detailText: mergeDetailText(for: metrics),
+                    tone: .live
+                )
+            )
+        }
+
+        return badges
+    }
+
+    private static func sourceDetailText(
+        message: String?,
+        lastActivityAt: Date?
+    ) -> String? {
+        let parts = [
+            message?.nilIfBlank,
+            lastActivityAt.map { "Last sample \($0.formatted(date: .omitted, time: .shortened))." }
+        ]
+        .compactMap { $0?.nilIfBlank }
+
+        guard !parts.isEmpty else {
+            return nil
+        }
+
+        return parts.joined(separator: " ")
+    }
+
+    private static func backlogDetailText(for metrics: LiveSessionMetrics) -> String? {
+        var parts: [String] = []
+
+        if metrics.peakPendingChunkCount > 0 {
+            let noun = metrics.peakPendingChunkCount == 1 ? "chunk" : "chunks"
+            parts.append("Peak backlog \(metrics.peakPendingChunkCount) \(noun).")
+        }
+
+        if let oldestPendingChunkStartedAt = metrics.oldestPendingChunkStartedAt {
+            parts.append("Oldest pending chunk \(oldestPendingChunkStartedAt.formatted(date: .omitted, time: .shortened)).")
+        }
+
+        guard !parts.isEmpty else {
+            return nil
+        }
+
+        return parts.joined(separator: " ")
+    }
+
+    private static func mergeDetailText(for metrics: LiveSessionMetrics) -> String {
+        if let lastMergedChunkLatency = metrics.lastMergedChunkLatency {
+            return "Latest live chunk merged \(durationText(for: lastMergedChunkLatency)) after the chunk closed."
+        }
+
+        return "Latest live chunk merged into the in-meeting preview."
+    }
+
+    private static func durationText(for duration: TimeInterval) -> String {
+        if duration < 1 {
+            return "in under a second"
+        }
+
+        if duration < 10 {
+            return "in \(String(format: "%.1f", duration))s"
+        }
+
+        return "in \(Int(duration.rounded()))s"
+    }
+
+    private static func fallbackDetailText(for note: MeetingNote) -> String {
+        switch note.captureState.phase {
+        case .capturing:
+            return "Capture is active. Oatmeal can reopen this panel and recover progress from saved live-session state if the app relaunches."
+        case .paused:
+            return "Capture is paused. Oatmeal will keep the session scaffold around and catch up when recording resumes."
+        case .failed:
+            return note.captureState.canResumeAfterCrash
+                ? "Oatmeal retained the session state so this meeting can recover after a relaunch."
+                : "Capture needs attention before live transcript updates can continue."
+        case .ready, .complete:
+            return "Live transcript updates will appear here while capture is active."
+        }
+    }
+
+    private static func fallbackPlaceholderText(for note: MeetingNote) -> String {
+        switch note.captureState.phase {
+        case .capturing:
+            return "Incremental transcript updates will appear here as live chunks are saved."
+        case .paused:
+            return "Capture is paused, so the live transcript is waiting for the meeting to resume."
+        case .failed:
+            return note.captureState.canResumeAfterCrash
+                ? "Recovered transcript chunks will appear here after the session resumes."
+                : "Live transcript updates are unavailable until capture is healthy again."
+        case .ready, .complete:
+            return "Open this panel during an active meeting to watch live transcript updates."
+        }
+    }
+
+    private static func tone(for status: LiveSessionStatus) -> LiveTranscriptPanelState.HealthTone {
+        switch status {
+        case .delayed:
+            return .delayed
+        case .recovered:
+            return .recovered
+        case .failed:
+            return .failed
+        default:
+            return .live
+        }
+    }
+
+    private static func tone(for status: LiveCaptureSourceStatus) -> LiveTranscriptPanelState.HealthTone {
+        switch status {
+        case .delayed:
+            .delayed
+        case .recovered:
+            .recovered
+        case .failed:
+            .failed
+        case .active:
+            .live
+        case .idle, .notRequired:
+            .live
+        }
+    }
+
+    private static func tone(for healthLabel: String) -> LiveTranscriptPanelState.HealthTone {
+        switch normalize(label: healthLabel) {
+        case "delayed", "catchingup":
+            .delayed
+        case "recovered":
+            .recovered
+        case "failed":
+            .failed
+        default:
+            .live
+        }
+    }
+
+    private static func titleCaseHealthLabel(_ rawLabel: String) -> String {
+        switch normalize(label: rawLabel) {
+        case "live", "active", "healthy":
+            "Live"
+        case "delayed", "catchingup", "lagging":
+            "Delayed"
+        case "recovered", "recoveredafterrelaunch":
+            "Recovered"
+        default:
+            rawLabel
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        }
+    }
+
+    private static func normalize(label: String) -> String {
+        label
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+    }
+
+    private static func unwrapped(_ value: Any) -> Any? {
+        let mirror = Mirror(reflecting: value)
+        guard mirror.displayStyle == .optional else {
+            return value
+        }
+        return mirror.children.first?.value
+    }
+
+    private static let activeStateLabels: Set<String> = [
+        "active",
+        "capturing",
+        "live",
+        "running"
+    ]
+
+    private static let liveSessionStatusesThatExposePanel: Set<LiveSessionStatus> = [
+        .live,
+        .delayed,
+        .recovered,
+        .failed
+    ]
+
+    struct ReflectedLiveSessionState {
+        let healthLabel: String
+        let detailText: String?
+        let placeholderText: String?
+        let lines: [LiveTranscriptPanelState.Line]
+    }
+}
+
+private struct LiveTranscriptStatusBadge: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        Text("\(title): \(value)")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(color.opacity(0.12), in: Capsule())
+            .foregroundStyle(color)
     }
 }
 

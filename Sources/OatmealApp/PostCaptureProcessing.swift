@@ -10,8 +10,10 @@ struct PostCaptureProcessingRequest: Equatable, Sendable {
 
 enum PostCaptureProcessingTrigger: String, Equatable, Sendable {
     case immediateAfterCapture
+    case interruptedCapture
     case relaunchRecovery
-    case manualRetry
+    case manualTranscriptionRetry
+    case manualGenerationRetry
 }
 
 enum PostCaptureProcessingError: LocalizedError {

@@ -164,6 +164,149 @@ final class OatmealEdgeTests: XCTestCase {
         XCTAssertEqual(segments[0].confidence, 0.92)
     }
 
+    func testAutomaticUsesExtractiveSummaryBackendWhenAvailable() async throws {
+        let tempDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let pipeline = LocalSummaryPipeline(
+            inventory: SummaryModelInventory(modelsDirectoryURL: tempDirectory),
+            mlx: StubMLXSummaryBackend(
+                reportedStatus: SummaryBackendStatus(
+                    backend: .mlxLocal,
+                    displayName: "MLX Local",
+                    availability: .unavailable,
+                    detail: "MLX unavailable.",
+                    isRunnable: false
+                )
+            ),
+            extractive: StubExtractiveSummaryBackend(
+                reportedStatus: SummaryBackendStatus(
+                    backend: .extractiveLocal,
+                    displayName: "Extractive Local",
+                    availability: .available,
+                    detail: "Ready.",
+                    isRunnable: true
+                )
+            ),
+            placeholder: StubPlaceholderSummaryBackend()
+        )
+
+        let plan = try await pipeline.executionPlan(configuration: .default)
+        XCTAssertEqual(plan.backend, .extractiveLocal)
+        XCTAssertEqual(plan.executionKind, .local)
+    }
+
+    func testRequireStructuredSummaryFailsWithoutExtractiveRuntime() async {
+        let tempDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let pipeline = LocalSummaryPipeline(
+            inventory: SummaryModelInventory(modelsDirectoryURL: tempDirectory),
+            mlx: StubMLXSummaryBackend(
+                reportedStatus: SummaryBackendStatus(
+                    backend: .mlxLocal,
+                    displayName: "MLX Local",
+                    availability: .unavailable,
+                    detail: "MLX unavailable.",
+                    isRunnable: false
+                )
+            ),
+            extractive: StubExtractiveSummaryBackend(
+                reportedStatus: SummaryBackendStatus(
+                    backend: .extractiveLocal,
+                    displayName: "Extractive Local",
+                    availability: .unavailable,
+                    detail: "No structured local summary backend is available.",
+                    isRunnable: false
+                )
+            ),
+            placeholder: StubPlaceholderSummaryBackend()
+        )
+
+        do {
+            _ = try await pipeline.executionPlan(
+                configuration: LocalSummaryConfiguration(
+                    preferredBackend: .extractiveLocal,
+                    executionPolicy: .requireStructuredSummary
+                )
+            )
+            XCTFail("Expected the pipeline to require the structured local backend.")
+        } catch {
+            XCTAssertEqual(
+                error as? SummaryPipelineError,
+                .localRuntimeRequired("No structured local summary backend is available.")
+            )
+        }
+    }
+
+    func testExtractiveSummaryBuildsStructuredEnhancedNote() async throws {
+        let backend = ExtractiveSummaryBackend()
+        let request = NoteGenerationRequest(
+            noteID: UUID(),
+            title: "Launch Review",
+            template: .projectReview,
+            meetingEvent: nil,
+            rawNotes: """
+            ### Status
+            - Launch checklist reviewed
+            - Next step: send the final checklist to ops
+            """,
+            transcriptSegments: [
+                TranscriptSegment(text: "We decided to keep the rollout on Friday."),
+                TranscriptSegment(text: "Question: do we need legal sign-off for the email copy?"),
+                TranscriptSegment(text: "Action: Maya will send the final checklist to ops.")
+            ]
+        )
+
+        let result = try await backend.generate(
+            request: request,
+            configuration: .default
+        )
+
+        XCTAssertEqual(result.backend, .extractiveLocal)
+        XCTAssertEqual(result.executionKind, .local)
+        XCTAssertTrue(result.enhancedNote.summary.contains("Launch Review"))
+        XCTAssertTrue(result.enhancedNote.decisions.contains { $0.contains("decided") })
+        XCTAssertTrue(result.enhancedNote.risksOrOpenQuestions.contains { $0.contains("Question") || $0.contains("question") })
+        XCTAssertTrue(result.enhancedNote.actionItems.contains { $0.text.localizedCaseInsensitiveContains("checklist") })
+        XCTAssertFalse(result.enhancedNote.citations.isEmpty)
+    }
+
+    func testMLXBackendPrefersManagedPythonOverPATH() throws {
+        let tempDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let managedPythonURL = tempDirectory.appendingPathComponent("python3", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: managedPythonURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: managedPythonURL.path)
+
+        let processExecutor = RecordingProcessExecutor()
+        let backend = MLXSummaryBackend(
+            executableLocator: ExecutableLocator(environment: ["PATH": "/usr/bin:/bin"]),
+            processExecutor: processExecutor,
+            managedPythonURL: managedPythonURL
+        )
+
+        let status = backend.status(
+            configuration: LocalSummaryConfiguration(
+                preferredBackend: .mlxLocal,
+                executionPolicy: .allowFallback,
+                preferredModelName: "Managed Test Model"
+            ),
+            discoveredModels: [
+                ManagedSummaryModel(
+                    displayName: "Managed Test Model",
+                    directoryURL: tempDirectory.appendingPathComponent("Managed Test Model", isDirectory: true)
+                )
+            ]
+        )
+
+        XCTAssertEqual(status.backend, .mlxLocal)
+        XCTAssertEqual(status.availability, .available)
+        XCTAssertTrue(status.isRunnable)
+        XCTAssertEqual(processExecutor.invocations, [managedPythonURL.path])
+    }
+
     func testWhisperCPPBackendSmokeTestWhenRuntimeAndFixtureArePresent() async throws {
         let environment = ProcessInfo.processInfo.environment
         let recordingPath = environment["OATMEAL_EDGE_SMOKE_RECORDING_PATH"]
@@ -270,6 +413,108 @@ private struct StubMockBackend: MockTranscriptionServing {
             ],
             backend: .mock,
             executionKind: .placeholder
+        )
+    }
+}
+
+private struct StubMLXSummaryBackend: MLXSummaryServing {
+    let reportedStatus: SummaryBackendStatus
+    var shouldThrow = false
+
+    func status(
+        configuration: LocalSummaryConfiguration,
+        discoveredModels: [ManagedSummaryModel]
+    ) -> SummaryBackendStatus {
+        reportedStatus
+    }
+
+    func generate(
+        request: NoteGenerationRequest,
+        configuration: LocalSummaryConfiguration,
+        discoveredModels: [ManagedSummaryModel]
+    ) async throws -> SummaryJobResult {
+        if shouldThrow {
+            throw SummaryPipelineError.generationFailed("Stub MLX failure")
+        }
+
+        return SummaryJobResult(
+            enhancedNote: EnhancedNote(
+                generatedAt: Date(),
+                templateID: request.template.id,
+                summary: "MLX summary for \(request.title)"
+            ),
+            backend: .mlxLocal,
+            executionKind: .local
+        )
+    }
+}
+
+private struct StubExtractiveSummaryBackend: ExtractiveSummaryServing {
+    let reportedStatus: SummaryBackendStatus
+    var shouldThrow = false
+
+    func status(configuration: LocalSummaryConfiguration) -> SummaryBackendStatus {
+        reportedStatus
+    }
+
+    func generate(
+        request: NoteGenerationRequest,
+        configuration: LocalSummaryConfiguration
+    ) async throws -> SummaryJobResult {
+        if shouldThrow {
+            throw SummaryPipelineError.generationFailed("Stub extractive failure")
+        }
+
+        return SummaryJobResult(
+            enhancedNote: EnhancedNote(
+                generatedAt: Date(),
+                templateID: request.template.id,
+                summary: "Extractive summary for \(request.title)"
+            ),
+            backend: .extractiveLocal,
+            executionKind: .local
+        )
+    }
+}
+
+private struct StubPlaceholderSummaryBackend: PlaceholderSummaryServing {
+    func status() -> SummaryBackendStatus {
+        SummaryBackendStatus(
+            backend: .placeholder,
+            displayName: "Placeholder",
+            availability: .available,
+            detail: "Ready.",
+            isRunnable: true
+        )
+    }
+
+    func generate(request: NoteGenerationRequest) async throws -> SummaryJobResult {
+        SummaryJobResult(
+            enhancedNote: EnhancedNote(
+                generatedAt: Date(),
+                templateID: request.template.id,
+                summary: "Placeholder summary"
+            ),
+            backend: .placeholder,
+            executionKind: .placeholder
+        )
+    }
+}
+
+private final class RecordingProcessExecutor: @unchecked Sendable, ProcessExecuting {
+    private(set) var invocations: [String] = []
+
+    func run(
+        executableURL: URL,
+        arguments _: [String],
+        environment _: [String: String],
+        currentDirectoryURL _: URL?
+    ) throws -> ProcessExecutionResult {
+        invocations.append(executableURL.path)
+        return ProcessExecutionResult(
+            terminationStatus: 0,
+            standardOutput: "",
+            standardError: ""
         )
     }
 }

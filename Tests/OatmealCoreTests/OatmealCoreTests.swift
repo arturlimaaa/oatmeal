@@ -311,4 +311,258 @@ final class OatmealCoreTests: XCTestCase {
         XCTAssertFalse(store.allNotes().isEmpty)
         XCTAssertEqual(store.upcomingMeetings(referenceDate: now, horizon: 3_600).count, 1)
     }
+
+    func testLiveSessionStateTracksStatusEntriesAndPanelPreference() {
+        var note = MeetingNote(
+            title: "Live note",
+            origin: .quickNote(createdAt: date(1_700_000_000))
+        )
+
+        note.beginLiveSession(at: date(1_700_000_010), presentTranscriptPanel: true)
+        note.registerProcessedLiveChunkID("microphone-0000", updatedAt: date(1_700_000_015))
+        note.appendLiveTranscriptEntry(
+            LiveTranscriptEntry(
+                createdAt: date(1_700_000_020),
+                kind: .transcript,
+                speakerName: "Speaker",
+                text: "Placeholder transcript chunk."
+            ),
+            updatedAt: date(1_700_000_020)
+        )
+        note.markLiveSessionDelayed(message: "Background transcription is catching up.", at: date(1_700_000_030))
+
+        XCTAssertEqual(note.liveSessionState.status, .delayed)
+        XCTAssertTrue(note.liveSessionState.isTranscriptPanelPresented)
+        XCTAssertEqual(note.liveSessionState.previewEntries.count, 2)
+        XCTAssertEqual(note.liveSessionState.previewEntries.last?.kind, .transcript)
+        XCTAssertEqual(note.liveSessionState.processedChunkIDs, ["microphone-0000"])
+        XCTAssertEqual(note.liveSessionState.statusMessage, "Background transcription is catching up.")
+
+        note.beginLiveSession(at: date(1_700_000_040), presentTranscriptPanel: false)
+        XCTAssertEqual(note.liveSessionState.previewEntries.count, 1)
+        XCTAssertEqual(note.liveSessionState.processedChunkIDs, [])
+    }
+
+    func testLegacyNoteDecodesIdleLiveSessionStateByDefault() throws {
+        let noteID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let createdAt = date(1_700_000_000)
+        let json = """
+        {
+          "id": "\(noteID.uuidString)",
+          "title": "Legacy note",
+          "origin": {
+            "kind": "quickNote",
+            "createdAt": \(createdAt.timeIntervalSinceReferenceDate)
+          },
+          "shareSettings": {
+            "privacyLevel": "private",
+            "includeTranscript": false,
+            "allowViewersToChat": false
+          },
+          "captureState": {
+            "phase": "ready",
+            "isRecoverableAfterCrash": false,
+            "permissions": {
+              "microphone": "granted",
+              "systemAudio": "granted",
+              "notifications": "granted",
+              "calendar": "granted"
+            }
+          },
+          "generationStatus": "idle",
+          "transcriptionStatus": "idle",
+          "rawNotes": "",
+          "transcriptSegments": [],
+          "transcriptionHistory": [],
+          "generationHistory": [],
+          "processingState": {
+            "stage": "idle",
+            "status": "idle"
+          },
+          "createdAt": \(createdAt.timeIntervalSinceReferenceDate),
+          "updatedAt": \(createdAt.timeIntervalSinceReferenceDate)
+        }
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+        let note = try decoder.decode(MeetingNote.self, from: Data(json.utf8))
+
+        XCTAssertEqual(note.liveSessionState, .idle)
+        XCTAssertFalse(note.hasLiveTranscriptPreview)
+    }
+
+    func testMeetingNotePersistsLiveSessionHealthAcrossCaptureRecovery() throws {
+        var note = MeetingNote(
+            title: "Live session recovery",
+            origin: .quickNote(createdAt: date(1_700_000_000))
+        )
+
+        note.beginLiveSession(at: date(1_700_000_010), presentTranscriptPanel: true)
+        note.markLiveSessionDelayed(message: "A microphone device disconnected.", at: date(1_700_000_020))
+        note.markLiveSessionRecovered(message: "A microphone device changed.", at: date(1_700_000_030))
+        note.registerProcessedLiveChunkID("microphone-0000", updatedAt: date(1_700_000_040))
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .deferredToDate
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+
+        let decoded = try decoder.decode(MeetingNote.self, from: encoder.encode(note))
+
+        XCTAssertEqual(decoded.liveSessionState.status, .recovered)
+        XCTAssertEqual(decoded.liveSessionState.statusMessage, "A microphone device changed.")
+        XCTAssertEqual(decoded.liveSessionState.lastRecoveryAt, date(1_700_000_030))
+        XCTAssertEqual(decoded.liveSessionState.previewEntries.count, 2)
+        XCTAssertEqual(decoded.liveSessionState.processedChunkIDs, ["microphone-0000"])
+        XCTAssertTrue(decoded.hasLiveTranscriptPreview)
+    }
+
+    func testMeetingNotePersistsSessionHealthMetricsAcrossEncodeDecode() throws {
+        var note = MeetingNote(
+            title: "Session health metrics",
+            origin: .quickNote(createdAt: date(1_700_000_000))
+        )
+
+        let startedAt = date(1_700_000_010)
+        let oldestPendingAt = date(1_700_000_015)
+        let degradedAt = date(1_700_000_020)
+        let recoveredAt = date(1_700_000_030)
+        let mergedAt = date(1_700_000_035)
+        let failedAt = date(1_700_000_040)
+
+        note.beginLiveSession(at: startedAt, presentTranscriptPanel: true, tracksSystemAudio: true)
+        note.updateLiveCaptureSource(
+            .microphone,
+            status: .delayed,
+            message: "Microphone stalled.",
+            updatedAt: degradedAt
+        )
+        note.markLiveSessionDelayed(message: "Microphone stalled.", at: degradedAt)
+        note.updateLiveCaptureSource(
+            .microphone,
+            status: .recovered,
+            message: "Microphone recovered.",
+            updatedAt: recoveredAt
+        )
+        note.markLiveSessionRecovered(message: "Microphone recovered.", at: recoveredAt)
+        note.recordMergedLiveChunk(updatedAt: mergedAt, sourceEndedAt: degradedAt)
+        note.updateLiveChunkBacklog(
+            pendingChunkCount: 1,
+            oldestPendingChunkStartedAt: oldestPendingAt,
+            updatedAt: mergedAt
+        )
+        note.updateLiveChunkBacklog(
+            pendingChunkCount: 0,
+            oldestPendingChunkStartedAt: nil,
+            updatedAt: failedAt
+        )
+        note.updateLiveCaptureSource(
+            .systemAudio,
+            status: .failed,
+            message: "System audio dropped.",
+            updatedAt: failedAt
+        )
+        note.failLiveSession(message: "System audio dropped.", at: failedAt)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .deferredToDate
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+
+        let decoded = try decoder.decode(MeetingNote.self, from: encoder.encode(note))
+
+        XCTAssertEqual(decoded.liveSessionState.status, .failed)
+        XCTAssertEqual(decoded.liveSessionState.statusMessage, "System audio dropped.")
+        XCTAssertEqual(decoded.liveSessionState.lastUpdatedAt, failedAt)
+        XCTAssertEqual(decoded.liveSessionState.microphoneSource.lastUpdatedAt, recoveredAt)
+        XCTAssertEqual(decoded.liveSessionState.systemAudioSource.lastUpdatedAt, failedAt)
+
+        let metrics = try XCTUnwrap(reflectedSessionHealthMetrics(in: decoded))
+        XCTAssertEqual(
+            reflectedInt(in: metrics, labels: ["recoveryCount", "recoveries", "recoveryEventsCount"]),
+            1
+        )
+        XCTAssertEqual(
+            reflectedInt(in: metrics, labels: ["interruptionCount", "interruptions", "interruptionEventsCount"]),
+            2
+        )
+        XCTAssertEqual(
+            reflectedDate(
+                in: metrics,
+                labels: ["microphoneLastActivityAt", "microphoneLastUpdatedAt", "microphoneActivityAt"]
+            ),
+            recoveredAt
+        )
+        XCTAssertEqual(
+            reflectedDate(
+                in: metrics,
+                labels: ["systemAudioLastActivityAt", "systemAudioLastUpdatedAt", "systemAudioActivityAt"]
+            ),
+            failedAt
+        )
+        XCTAssertEqual(
+            reflectedInt(in: metrics, labels: ["pendingChunkCount", "pendingLiveChunkCount", "backlogDepth", "backlogCount"]),
+            0
+        )
+        XCTAssertNil(
+            reflectedDate(
+                in: metrics,
+                labels: ["oldestPendingChunkStartedAt", "oldestPendingChunkAt", "oldestBacklogChunkAt"]
+            )
+        )
+        XCTAssertEqual(
+            reflectedDate(
+                in: metrics,
+                labels: ["lastMergedLiveChunkAt", "lastMergedChunkAt", "mergedChunkAt"]
+            ),
+            mergedAt
+        )
+        XCTAssertEqual(
+            reflectedInt(in: metrics, labels: ["peakPendingChunkCount", "peakBacklogCount", "maxPendingChunkCount"]),
+            1
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                reflectedDouble(in: metrics, labels: ["lastMergedChunkLatency", "chunkLatency", "lastChunkLatency"])
+            ),
+            mergedAt.timeIntervalSince(degradedAt),
+            accuracy: 0.001
+        )
+    }
+
+    private func reflectedSessionHealthMetrics(in note: MeetingNote) -> Any? {
+        reflectedValue(
+            in: note.liveSessionState,
+            labels: ["sessionHealthMetrics", "liveSessionMetrics", "healthMetrics", "metrics"]
+        )
+    }
+
+    private func reflectedValue(in value: Any, labels: [String]) -> Any? {
+        let normalizedLabels = Set(labels.map(normalizedLabel(_:)))
+        for child in Mirror(reflecting: value).children {
+            guard let label = child.label, normalizedLabels.contains(normalizedLabel(label)) else {
+                continue
+            }
+            return child.value
+        }
+
+        return nil
+    }
+
+    private func reflectedInt(in value: Any, labels: [String]) -> Int? {
+        reflectedValue(in: value, labels: labels) as? Int
+    }
+
+    private func reflectedDate(in value: Any, labels: [String]) -> Date? {
+        reflectedValue(in: value, labels: labels) as? Date
+    }
+
+    private func reflectedDouble(in value: Any, labels: [String]) -> Double? {
+        reflectedValue(in: value, labels: labels) as? Double
+    }
+
+    private func normalizedLabel(_ label: String) -> String {
+        label.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
 }

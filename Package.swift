@@ -26,7 +26,10 @@ let package = Package(
         ),
         .target(
             name: "OatmealEdge",
-            dependencies: ["OatmealCore"]
+            dependencies: ["OatmealCore"],
+            resources: [
+                .copy("Resources")
+            ]
         ),
         .target(
             name: "OatmealUI",

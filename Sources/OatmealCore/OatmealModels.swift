@@ -137,6 +137,33 @@ public struct TranscriptSegment: Codable, Equatable, Hashable, Sendable, Identif
     }
 }
 
+public enum LiveTranscriptEntryKind: String, Codable, Equatable, Hashable, Sendable {
+    case system
+    case transcript
+}
+
+public struct LiveTranscriptEntry: Codable, Equatable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var createdAt: Date
+    public var kind: LiveTranscriptEntryKind
+    public var speakerName: String?
+    public var text: String
+
+    public init(
+        id: UUID = UUID(),
+        createdAt: Date = Date(),
+        kind: LiveTranscriptEntryKind = .transcript,
+        speakerName: String? = nil,
+        text: String
+    ) {
+        self.id = id
+        self.createdAt = createdAt
+        self.kind = kind
+        self.speakerName = speakerName
+        self.text = text
+    }
+}
+
 public enum ActionItemStatus: String, Codable, Equatable, Sendable {
     case open
     case done
@@ -398,6 +425,554 @@ public struct PostCaptureProcessingState: Codable, Equatable, Sendable {
     }
 }
 
+public enum LiveSessionStatus: String, Codable, Equatable, Sendable {
+    case idle
+    case live
+    case delayed
+    case recovered
+    case completed
+    case failed
+
+    public var displayLabel: String {
+        switch self {
+        case .idle:
+            "Idle"
+        case .live:
+            "Live"
+        case .delayed:
+            "Delayed"
+        case .recovered:
+            "Recovered"
+        case .completed:
+            "Completed"
+        case .failed:
+            "Failed"
+        }
+    }
+}
+
+public enum LiveCaptureSourceID: String, Codable, Equatable, Sendable {
+    case microphone
+    case systemAudio
+
+    public var displayLabel: String {
+        switch self {
+        case .microphone:
+            "Microphone"
+        case .systemAudio:
+            "System Audio"
+        }
+    }
+}
+
+public enum LiveCaptureSourceStatus: String, Codable, Equatable, Sendable {
+    case idle
+    case active
+    case delayed
+    case recovered
+    case failed
+    case notRequired
+
+    public var displayLabel: String {
+        switch self {
+        case .idle:
+            "Idle"
+        case .active:
+            "Live"
+        case .delayed:
+            "Delayed"
+        case .recovered:
+            "Recovered"
+        case .failed:
+            "Failed"
+        case .notRequired:
+            "Not Needed"
+        }
+    }
+}
+
+public struct LiveCaptureSourceState: Codable, Equatable, Sendable {
+    public var status: LiveCaptureSourceStatus
+    public var statusMessage: String?
+    public var lastUpdatedAt: Date?
+
+    public init(
+        status: LiveCaptureSourceStatus = .idle,
+        statusMessage: String? = nil,
+        lastUpdatedAt: Date? = nil
+    ) {
+        self.status = status
+        self.statusMessage = statusMessage
+        self.lastUpdatedAt = lastUpdatedAt
+    }
+
+    public static let idle = LiveCaptureSourceState()
+
+    public mutating func reset(isRequired: Bool, at date: Date) {
+        status = isRequired ? .active : .notRequired
+        statusMessage = isRequired ? "Connected" : "Not required for this note."
+        lastUpdatedAt = date
+    }
+
+    public mutating func update(
+        status: LiveCaptureSourceStatus,
+        message: String? = nil,
+        at date: Date = Date()
+    ) {
+        self.status = status
+        if let message {
+            statusMessage = message
+        }
+        lastUpdatedAt = date
+    }
+}
+
+public struct LiveSessionMetrics: Codable, Equatable, Sendable {
+    public var recoveryCount: Int
+    public var interruptionCount: Int
+    public var microphoneLastActivityAt: Date?
+    public var systemAudioLastActivityAt: Date?
+    public var lastMergedLiveChunkAt: Date?
+    public var lastMergedChunkLatency: TimeInterval?
+    public var pendingChunkCount: Int
+    public var peakPendingChunkCount: Int
+    public var oldestPendingChunkStartedAt: Date?
+
+    public init(
+        recoveryCount: Int = 0,
+        interruptionCount: Int = 0,
+        microphoneLastActivityAt: Date? = nil,
+        systemAudioLastActivityAt: Date? = nil,
+        lastMergedLiveChunkAt: Date? = nil,
+        lastMergedChunkLatency: TimeInterval? = nil,
+        pendingChunkCount: Int = 0,
+        peakPendingChunkCount: Int = 0,
+        oldestPendingChunkStartedAt: Date? = nil
+    ) {
+        self.recoveryCount = recoveryCount
+        self.interruptionCount = interruptionCount
+        self.microphoneLastActivityAt = microphoneLastActivityAt
+        self.systemAudioLastActivityAt = systemAudioLastActivityAt
+        self.lastMergedLiveChunkAt = lastMergedLiveChunkAt
+        self.lastMergedChunkLatency = lastMergedChunkLatency
+        self.pendingChunkCount = pendingChunkCount
+        self.peakPendingChunkCount = peakPendingChunkCount
+        self.oldestPendingChunkStartedAt = oldestPendingChunkStartedAt
+    }
+
+    public static let empty = LiveSessionMetrics()
+
+    public mutating func reset(at date: Date, tracksSystemAudio: Bool) {
+        recoveryCount = 0
+        interruptionCount = 0
+        microphoneLastActivityAt = date
+        systemAudioLastActivityAt = tracksSystemAudio ? date : nil
+        lastMergedLiveChunkAt = nil
+        lastMergedChunkLatency = nil
+        pendingChunkCount = 0
+        peakPendingChunkCount = 0
+        oldestPendingChunkStartedAt = nil
+    }
+
+    @discardableResult
+    public mutating func recordRecovery() -> Bool {
+        recoveryCount += 1
+        return true
+    }
+
+    @discardableResult
+    public mutating func recordInterruption() -> Bool {
+        interruptionCount += 1
+        return true
+    }
+
+    @discardableResult
+    public mutating func recordSourceActivity(
+        _ source: LiveCaptureSourceID,
+        at date: Date
+    ) -> Bool {
+        switch source {
+        case .microphone:
+            return Self.updateDate(&microphoneLastActivityAt, with: date)
+        case .systemAudio:
+            return Self.updateDate(&systemAudioLastActivityAt, with: date)
+        }
+    }
+
+    @discardableResult
+    public mutating func registerMergedLiveChunk(
+        mergedAt date: Date,
+        sourceEndedAt: Date?
+    ) -> Bool {
+        var didChange = Self.updateDate(&lastMergedLiveChunkAt, with: date)
+        let latency = sourceEndedAt.map { max(date.timeIntervalSince($0), 0) }
+        if lastMergedChunkLatency != latency {
+            lastMergedChunkLatency = latency
+            didChange = true
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func updateBacklog(
+        pendingChunkCount: Int,
+        oldestPendingChunkStartedAt: Date?
+    ) -> Bool {
+        let normalizedCount = max(pendingChunkCount, 0)
+        var didChange = false
+
+        if self.pendingChunkCount != normalizedCount {
+            self.pendingChunkCount = normalizedCount
+            didChange = true
+        }
+
+        if peakPendingChunkCount < normalizedCount {
+            peakPendingChunkCount = normalizedCount
+            didChange = true
+        }
+
+        if self.oldestPendingChunkStartedAt != oldestPendingChunkStartedAt {
+            self.oldestPendingChunkStartedAt = oldestPendingChunkStartedAt
+            didChange = true
+        }
+
+        return didChange
+    }
+
+    @discardableResult
+    private static func updateDate(_ target: inout Date?, with date: Date) -> Bool {
+        if let target, target >= date {
+            return false
+        }
+
+        target = date
+        return true
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recoveryCount
+        case interruptionCount
+        case microphoneLastActivityAt
+        case systemAudioLastActivityAt
+        case legacyLastMicrophoneActivityAt = "lastMicrophoneActivityAt"
+        case legacyLastSystemAudioActivityAt = "lastSystemAudioActivityAt"
+        case lastMergedLiveChunkAt
+        case lastMergedChunkLatency
+        case pendingChunkCount
+        case peakPendingChunkCount
+        case oldestPendingChunkStartedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recoveryCount = try container.decodeIfPresent(Int.self, forKey: .recoveryCount) ?? 0
+        interruptionCount = try container.decodeIfPresent(Int.self, forKey: .interruptionCount) ?? 0
+        microphoneLastActivityAt = try container.decodeIfPresent(Date.self, forKey: .microphoneLastActivityAt)
+            ?? container.decodeIfPresent(Date.self, forKey: .legacyLastMicrophoneActivityAt)
+        systemAudioLastActivityAt = try container.decodeIfPresent(Date.self, forKey: .systemAudioLastActivityAt)
+            ?? container.decodeIfPresent(Date.self, forKey: .legacyLastSystemAudioActivityAt)
+        lastMergedLiveChunkAt = try container.decodeIfPresent(Date.self, forKey: .lastMergedLiveChunkAt)
+        lastMergedChunkLatency = try container.decodeIfPresent(TimeInterval.self, forKey: .lastMergedChunkLatency)
+        pendingChunkCount = try container.decodeIfPresent(Int.self, forKey: .pendingChunkCount) ?? 0
+        peakPendingChunkCount = try container.decodeIfPresent(Int.self, forKey: .peakPendingChunkCount) ?? pendingChunkCount
+        oldestPendingChunkStartedAt = try container.decodeIfPresent(Date.self, forKey: .oldestPendingChunkStartedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(recoveryCount, forKey: .recoveryCount)
+        try container.encode(interruptionCount, forKey: .interruptionCount)
+        try container.encodeIfPresent(microphoneLastActivityAt, forKey: .microphoneLastActivityAt)
+        try container.encodeIfPresent(systemAudioLastActivityAt, forKey: .systemAudioLastActivityAt)
+        try container.encodeIfPresent(lastMergedLiveChunkAt, forKey: .lastMergedLiveChunkAt)
+        try container.encodeIfPresent(lastMergedChunkLatency, forKey: .lastMergedChunkLatency)
+        try container.encode(pendingChunkCount, forKey: .pendingChunkCount)
+        try container.encode(peakPendingChunkCount, forKey: .peakPendingChunkCount)
+        try container.encodeIfPresent(oldestPendingChunkStartedAt, forKey: .oldestPendingChunkStartedAt)
+    }
+}
+
+public struct LiveSessionState: Codable, Equatable, Sendable {
+    public var status: LiveSessionStatus
+    public var isTranscriptPanelPresented: Bool
+    public var previewEntries: [LiveTranscriptEntry]
+    public var processedChunkIDs: [String]
+    public var metrics: LiveSessionMetrics
+    public var microphoneSource: LiveCaptureSourceState
+    public var systemAudioSource: LiveCaptureSourceState
+    public var statusMessage: String?
+    public var lastUpdatedAt: Date?
+    public var lastRecoveryAt: Date?
+
+    public init(
+        status: LiveSessionStatus = .idle,
+        isTranscriptPanelPresented: Bool = false,
+        previewEntries: [LiveTranscriptEntry] = [],
+        processedChunkIDs: [String] = [],
+        metrics: LiveSessionMetrics = .empty,
+        microphoneSource: LiveCaptureSourceState = .idle,
+        systemAudioSource: LiveCaptureSourceState = LiveCaptureSourceState(status: .notRequired),
+        statusMessage: String? = nil,
+        lastUpdatedAt: Date? = nil,
+        lastRecoveryAt: Date? = nil
+    ) {
+        self.status = status
+        self.isTranscriptPanelPresented = isTranscriptPanelPresented
+        self.previewEntries = previewEntries
+        self.processedChunkIDs = processedChunkIDs
+        self.metrics = metrics
+        self.microphoneSource = microphoneSource
+        self.systemAudioSource = systemAudioSource
+        self.statusMessage = statusMessage
+        self.lastUpdatedAt = lastUpdatedAt
+        self.lastRecoveryAt = lastRecoveryAt
+    }
+
+    public static let idle = LiveSessionState()
+
+    public var hasPreviewEntries: Bool {
+        !previewEntries.isEmpty
+    }
+
+    public func hasProcessedChunkID(_ chunkID: String) -> Bool {
+        processedChunkIDs.contains(chunkID)
+    }
+
+    public var isActive: Bool {
+        status == .live || status == .delayed
+    }
+
+    public mutating func begin(
+        at date: Date = Date(),
+        presentTranscriptPanel: Bool = false,
+        tracksSystemAudio: Bool = false
+    ) {
+        status = .live
+        isTranscriptPanelPresented = presentTranscriptPanel
+        previewEntries = []
+        processedChunkIDs = []
+        metrics.reset(at: date, tracksSystemAudio: tracksSystemAudio)
+        microphoneSource.reset(isRequired: true, at: date)
+        systemAudioSource.reset(isRequired: tracksSystemAudio, at: date)
+        statusMessage = "Oatmeal is listening locally and preparing live transcript updates."
+        lastUpdatedAt = date
+        appendEntry(
+            LiveTranscriptEntry(
+                createdAt: date,
+                kind: .system,
+                text: "Live session started. Background transcript updates will appear here."
+            ),
+            updatedAt: date
+        )
+    }
+
+    public mutating func appendEntry(_ entry: LiveTranscriptEntry, updatedAt: Date = Date()) {
+        previewEntries.append(entry)
+        lastUpdatedAt = updatedAt
+    }
+
+    public mutating func registerProcessedChunkID(_ chunkID: String, updatedAt: Date = Date()) {
+        if !processedChunkIDs.contains(chunkID) {
+            processedChunkIDs.append(chunkID)
+        }
+        lastUpdatedAt = updatedAt
+    }
+
+    public mutating func presentTranscriptPanel(_ presented: Bool, updatedAt: Date = Date()) {
+        isTranscriptPanelPresented = presented
+        lastUpdatedAt = updatedAt
+    }
+
+    public mutating func markLive(message: String? = nil, at date: Date = Date()) {
+        status = .live
+        if let message {
+            statusMessage = message
+        }
+        lastUpdatedAt = date
+    }
+
+    public mutating func markDelayed(message: String, at date: Date = Date()) {
+        status = .delayed
+        statusMessage = message
+        _ = metrics.recordInterruption()
+        lastUpdatedAt = date
+    }
+
+    public mutating func markRecovered(message: String, at date: Date = Date()) {
+        status = .recovered
+        statusMessage = message
+        _ = metrics.recordRecovery()
+        lastUpdatedAt = date
+        lastRecoveryAt = date
+        appendEntry(
+            LiveTranscriptEntry(
+                createdAt: date,
+                kind: .system,
+                text: message
+            ),
+            updatedAt: date
+        )
+    }
+
+    public mutating func complete(message: String? = nil, at date: Date = Date()) {
+        status = .completed
+        statusMessage = message ?? "Recording stopped. Oatmeal will finish transcription in the background."
+        lastUpdatedAt = date
+        appendEntry(
+            LiveTranscriptEntry(
+                createdAt: date,
+                kind: .system,
+                text: statusMessage ?? "Recording stopped."
+            ),
+            updatedAt: date
+        )
+    }
+
+    public mutating func fail(message: String, at date: Date = Date()) {
+        status = .failed
+        statusMessage = message
+        _ = metrics.recordInterruption()
+        lastUpdatedAt = date
+        appendEntry(
+            LiveTranscriptEntry(
+                createdAt: date,
+                kind: .system,
+                text: message
+            ),
+            updatedAt: date
+        )
+    }
+
+    public mutating func replaceTranscriptPreviewEntries(
+        _ entries: [LiveTranscriptEntry],
+        updatedAt: Date = Date()
+    ) {
+        let systemEntries = previewEntries.filter { $0.kind == .system }
+        previewEntries = systemEntries + entries
+        lastUpdatedAt = updatedAt
+    }
+
+    public mutating func updateSource(
+        _ source: LiveCaptureSourceID,
+        status: LiveCaptureSourceStatus,
+        message: String? = nil,
+        at date: Date = Date()
+    ) {
+        switch source {
+        case .microphone:
+            microphoneSource.update(status: status, message: message, at: date)
+        case .systemAudio:
+            systemAudioSource.update(status: status, message: message, at: date)
+        }
+        if status != .idle && status != .notRequired {
+            _ = metrics.recordSourceActivity(source, at: date)
+        }
+        lastUpdatedAt = date
+    }
+
+    @discardableResult
+    public mutating func recordSourceActivity(
+        _ source: LiveCaptureSourceID,
+        at date: Date = Date()
+    ) -> Bool {
+        let didChange = metrics.recordSourceActivity(source, at: date)
+        if didChange {
+            lastUpdatedAt = date
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func registerMergedLiveChunk(
+        updatedAt date: Date = Date(),
+        sourceEndedAt: Date? = nil
+    ) -> Bool {
+        let didChange = metrics.registerMergedLiveChunk(
+            mergedAt: date,
+            sourceEndedAt: sourceEndedAt
+        )
+        if didChange {
+            lastUpdatedAt = date
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func updateBacklog(
+        pendingChunkCount: Int,
+        oldestPendingChunkStartedAt: Date?,
+        at date: Date = Date()
+    ) -> Bool {
+        let didChange = metrics.updateBacklog(
+            pendingChunkCount: pendingChunkCount,
+            oldestPendingChunkStartedAt: oldestPendingChunkStartedAt
+        )
+        if didChange {
+            lastUpdatedAt = date
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func recordRecovery(at date: Date = Date()) -> Bool {
+        let didChange = metrics.recordRecovery()
+        if didChange {
+            lastUpdatedAt = date
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func recordInterruption(at date: Date = Date()) -> Bool {
+        let didChange = metrics.recordInterruption()
+        if didChange {
+            lastUpdatedAt = date
+        }
+        return didChange
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case isTranscriptPanelPresented
+        case previewEntries
+        case processedChunkIDs
+        case metrics
+        case microphoneSource
+        case systemAudioSource
+        case statusMessage
+        case lastUpdatedAt
+        case lastRecoveryAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decodeIfPresent(LiveSessionStatus.self, forKey: .status) ?? .idle
+        isTranscriptPanelPresented = try container.decodeIfPresent(Bool.self, forKey: .isTranscriptPanelPresented) ?? false
+        previewEntries = try container.decodeIfPresent([LiveTranscriptEntry].self, forKey: .previewEntries) ?? []
+        processedChunkIDs = try container.decodeIfPresent([String].self, forKey: .processedChunkIDs) ?? []
+        metrics = try container.decodeIfPresent(LiveSessionMetrics.self, forKey: .metrics) ?? .empty
+        microphoneSource = try container.decodeIfPresent(LiveCaptureSourceState.self, forKey: .microphoneSource) ?? .idle
+        systemAudioSource = try container.decodeIfPresent(LiveCaptureSourceState.self, forKey: .systemAudioSource) ?? LiveCaptureSourceState(status: .notRequired)
+        statusMessage = try container.decodeIfPresent(String.self, forKey: .statusMessage)
+        lastUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .lastUpdatedAt)
+        lastRecoveryAt = try container.decodeIfPresent(Date.self, forKey: .lastRecoveryAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encode(isTranscriptPanelPresented, forKey: .isTranscriptPanelPresented)
+        try container.encode(previewEntries, forKey: .previewEntries)
+        try container.encode(processedChunkIDs, forKey: .processedChunkIDs)
+        try container.encode(metrics, forKey: .metrics)
+        try container.encode(microphoneSource, forKey: .microphoneSource)
+        try container.encode(systemAudioSource, forKey: .systemAudioSource)
+        try container.encodeIfPresent(statusMessage, forKey: .statusMessage)
+        try container.encodeIfPresent(lastUpdatedAt, forKey: .lastUpdatedAt)
+        try container.encodeIfPresent(lastRecoveryAt, forKey: .lastRecoveryAt)
+    }
+}
+
 public enum SharePrivacyLevel: String, Codable, Equatable, Sendable {
     case `private`
     case anyoneWithLink
@@ -583,6 +1158,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public var transcriptionStatus: NoteTranscriptionStatus
     public var rawNotes: String
     public var transcriptSegments: [TranscriptSegment]
+    public var liveSessionState: LiveSessionState
     public var enhancedNote: EnhancedNote?
     public var transcriptionHistory: [NoteTranscriptionAttempt]
     public var generationHistory: [NoteGenerationAttempt]
@@ -603,6 +1179,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         transcriptionStatus: NoteTranscriptionStatus = .idle,
         rawNotes: String = "",
         transcriptSegments: [TranscriptSegment] = [],
+        liveSessionState: LiveSessionState = .idle,
         enhancedNote: EnhancedNote? = nil,
         transcriptionHistory: [NoteTranscriptionAttempt] = [],
         generationHistory: [NoteGenerationAttempt] = [],
@@ -622,6 +1199,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         self.transcriptionStatus = transcriptionStatus
         self.rawNotes = rawNotes
         self.transcriptSegments = transcriptSegments
+        self.liveSessionState = liveSessionState
         self.enhancedNote = enhancedNote
         self.transcriptionHistory = transcriptionHistory
         self.generationHistory = generationHistory
@@ -643,6 +1221,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         case transcriptionStatus
         case rawNotes
         case transcriptSegments
+        case liveSessionState
         case enhancedNote
         case transcriptionHistory
         case generationHistory
@@ -665,6 +1244,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         transcriptionStatus = try container.decodeIfPresent(NoteTranscriptionStatus.self, forKey: .transcriptionStatus) ?? .idle
         rawNotes = try container.decodeIfPresent(String.self, forKey: .rawNotes) ?? ""
         transcriptSegments = try container.decodeIfPresent([TranscriptSegment].self, forKey: .transcriptSegments) ?? []
+        liveSessionState = try container.decodeIfPresent(LiveSessionState.self, forKey: .liveSessionState) ?? .idle
         enhancedNote = try container.decodeIfPresent(EnhancedNote.self, forKey: .enhancedNote)
         transcriptionHistory = try container.decodeIfPresent([NoteTranscriptionAttempt].self, forKey: .transcriptionHistory) ?? []
         generationHistory = try container.decodeIfPresent([NoteGenerationAttempt].self, forKey: .generationHistory) ?? []
@@ -694,6 +1274,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         try container.encode(transcriptionStatus, forKey: .transcriptionStatus)
         try container.encode(rawNotes, forKey: .rawNotes)
         try container.encode(transcriptSegments, forKey: .transcriptSegments)
+        try container.encode(liveSessionState, forKey: .liveSessionState)
         try container.encodeIfPresent(enhancedNote, forKey: .enhancedNote)
         try container.encode(transcriptionHistory, forKey: .transcriptionHistory)
         try container.encode(generationHistory, forKey: .generationHistory)
@@ -708,6 +1289,14 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
 
     public var hasTranscript: Bool {
         !transcriptSegments.isEmpty
+    }
+
+    public var hasLiveTranscriptPreview: Bool {
+        liveSessionState.hasPreviewEntries
+    }
+
+    public var hasRawNotes: Bool {
+        !rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public var canBeSharedWithTranscript: Bool {
@@ -738,7 +1327,149 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         self.updatedAt = updatedAt
     }
 
+    public mutating func beginLiveSession(
+        at startedAt: Date = Date(),
+        presentTranscriptPanel: Bool = false,
+        tracksSystemAudio: Bool = false
+    ) {
+        liveSessionState.begin(
+            at: startedAt,
+            presentTranscriptPanel: presentTranscriptPanel,
+            tracksSystemAudio: tracksSystemAudio
+        )
+        updatedAt = startedAt
+    }
+
+    public mutating func appendLiveTranscriptEntry(_ entry: LiveTranscriptEntry, updatedAt: Date = Date()) {
+        liveSessionState.appendEntry(entry, updatedAt: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func registerProcessedLiveChunkID(_ chunkID: String, updatedAt: Date = Date()) {
+        liveSessionState.registerProcessedChunkID(chunkID, updatedAt: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    @discardableResult
+    public mutating func recordLiveCaptureSourceActivity(
+        _ source: LiveCaptureSourceID,
+        updatedAt: Date = Date()
+    ) -> Bool {
+        let didChange = liveSessionState.recordSourceActivity(source, at: updatedAt)
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func recordMergedLiveChunk(
+        updatedAt: Date = Date(),
+        sourceEndedAt: Date? = nil
+    ) -> Bool {
+        let didChange = liveSessionState.registerMergedLiveChunk(
+            updatedAt: updatedAt,
+            sourceEndedAt: sourceEndedAt
+        )
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func updateLiveChunkBacklog(
+        pendingChunkCount: Int,
+        oldestPendingChunkStartedAt: Date?,
+        updatedAt: Date = Date()
+    ) -> Bool {
+        let didChange = liveSessionState.updateBacklog(
+            pendingChunkCount: pendingChunkCount,
+            oldestPendingChunkStartedAt: oldestPendingChunkStartedAt,
+            at: updatedAt
+        )
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func recordLiveSessionRecovery(updatedAt: Date = Date()) -> Bool {
+        let didChange = liveSessionState.recordRecovery(at: updatedAt)
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func recordLiveSessionInterruption(updatedAt: Date = Date()) -> Bool {
+        let didChange = liveSessionState.recordInterruption(at: updatedAt)
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    public mutating func setLiveTranscriptPanelPresented(_ presented: Bool, updatedAt: Date = Date()) {
+        liveSessionState.presentTranscriptPanel(presented, updatedAt: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func markLiveSessionLive(message: String? = nil, at updatedAt: Date = Date()) {
+        liveSessionState.markLive(message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func updateLiveCaptureSource(
+        _ source: LiveCaptureSourceID,
+        status: LiveCaptureSourceStatus,
+        message: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        liveSessionState.updateSource(source, status: status, message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func markLiveSessionDelayed(message: String, at updatedAt: Date = Date()) {
+        liveSessionState.markDelayed(message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func markLiveSessionRecovered(message: String, at updatedAt: Date = Date()) {
+        liveSessionState.markRecovered(message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func completeLiveSession(message: String? = nil, at updatedAt: Date = Date()) {
+        liveSessionState.complete(message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func failLiveSession(message: String, at updatedAt: Date = Date()) {
+        liveSessionState.fail(message: message, at: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func replaceLiveTranscriptPreviewEntries(
+        _ entries: [LiveTranscriptEntry],
+        updatedAt: Date = Date()
+    ) {
+        liveSessionState.replaceTranscriptPreviewEntries(entries, updatedAt: updatedAt)
+        self.updatedAt = updatedAt
+    }
+
     public mutating func queueTranscription(at queuedAt: Date = Date()) {
+        processingState.queue(.transcription, at: queuedAt)
+        updatedAt = queuedAt
+    }
+
+    public mutating func prepareTranscriptionRetry(at queuedAt: Date = Date()) {
+        transcriptSegments = []
+        enhancedNote = nil
+        transcriptionStatus = .idle
+        generationStatus = .idle
         processingState.queue(.transcription, at: queuedAt)
         updatedAt = queuedAt
     }
@@ -832,6 +1563,14 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
 
     public mutating func queueGeneration(templateID: UUID?, at queuedAt: Date = Date()) {
         self.templateID = templateID
+        processingState.queue(.generation, at: queuedAt)
+        updatedAt = queuedAt
+    }
+
+    public mutating func prepareGenerationRetry(templateID: UUID?, at queuedAt: Date = Date()) {
+        self.templateID = templateID
+        enhancedNote = nil
+        generationStatus = .idle
         processingState.queue(.generation, at: queuedAt)
         updatedAt = queuedAt
     }

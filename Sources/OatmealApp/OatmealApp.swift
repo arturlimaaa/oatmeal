@@ -17,7 +17,7 @@ public struct OatmealPackageApp: App {
         Settings {
             OatmealSettingsView()
                 .environment(model)
-                .frame(width: 520, height: 420)
+                .frame(width: 520, height: 560)
         }
     }
 }

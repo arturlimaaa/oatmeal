@@ -7,14 +7,19 @@ import OatmealEdge
 @Observable
 final class AppViewModel {
     private let store: InMemoryOatmealStore
-    private let generator: NoteGenerationService
     private let calendarService: CalendarAccessServing
     private let captureService: CaptureAccessServing
     private let captureEngine: MeetingCaptureEngineServing
     private let transcriptionService: any LocalTranscriptionServicing
+    private let summaryService: any LocalSummaryServicing
+    private let summaryModelManager: any LocalSummaryModelManaging
     private let persistence: AppPersistence
     private let nowProvider: () -> Date
+    private let liveTranscriptionPollingIntervalNanoseconds: UInt64
     @ObservationIgnored private var processingTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var liveTranscriptionTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
+    private let recoveredLiveTranscriptWarning = "Final recording transcription did not complete, so Oatmeal kept the recovered near-live transcript preview. Retry transcription later for a full pass."
+    @ObservationIgnored private var summaryModelManagementTask: Task<Void, Never>?
 
     var folders: [NoteFolder] = []
     var notes: [MeetingNote] = []
@@ -28,6 +33,12 @@ final class AppViewModel {
     var capturePermissionMessage: String?
     var transcriptionConfiguration = LocalTranscriptionConfiguration.default
     var transcriptionRuntimeState: LocalTranscriptionRuntimeState?
+    var summaryConfiguration = LocalSummaryConfiguration.default
+    var summaryRuntimeState: LocalSummaryRuntimeState?
+    var summaryModelCatalogState: SummaryModelCatalogState?
+    var activeSummaryModelOperation: SummaryModelOperationState?
+    var summaryModelManagementError: String?
+    var summaryExecutionPlansByNoteID: [MeetingNote.ID: LocalSummaryExecutionPlan] = [:]
     var selectedSidebarItem: SidebarItem = .upcoming
     var selectedUpcomingEventID: CalendarEvent.ID?
     var selectedNoteID: MeetingNote.ID?
@@ -36,22 +47,32 @@ final class AppViewModel {
 
     init(
         store: InMemoryOatmealStore = .preview(),
-        generator: NoteGenerationService = DeterministicNoteGenerationService(),
         calendarService: CalendarAccessServing = LiveCalendarAccessService(),
         captureService: CaptureAccessServing = LiveCaptureAccessService(),
         captureEngine: MeetingCaptureEngineServing = LiveMeetingCaptureEngine(),
         transcriptionService: (any LocalTranscriptionServicing)? = nil,
+        summaryService: (any LocalSummaryServicing)? = nil,
+        summaryModelManager: (any LocalSummaryModelManaging)? = nil,
         persistence: AppPersistence = .shared,
-        nowProvider: @escaping () -> Date = Date.init
+        nowProvider: @escaping () -> Date = Date.init,
+        liveTranscriptionPollingInterval: TimeInterval = 4
     ) {
         self.store = store
-        self.generator = generator
         self.calendarService = calendarService
         self.captureService = captureService
         self.captureEngine = captureEngine
         self.persistence = persistence
         self.nowProvider = nowProvider
+        self.liveTranscriptionPollingIntervalNanoseconds = UInt64(
+            max(liveTranscriptionPollingInterval, 0.25) * 1_000_000_000
+        )
         self.transcriptionService = transcriptionService ?? LocalTranscriptionPipeline(
+            applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
+        )
+        self.summaryService = summaryService ?? LocalSummaryPipeline(
+            applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
+        )
+        self.summaryModelManager = summaryModelManager ?? LocalSummaryModelManager(
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
 
@@ -150,6 +171,9 @@ final class AppViewModel {
         await loadCalendarState()
         await refreshCapturePermissions()
         await refreshTranscriptionRuntimeState()
+        await refreshSummaryRuntimeState()
+        await refreshSummaryModelCatalogState()
+        recoverLiveSessionsIfNeeded()
         resumePostCaptureProcessingIfNeeded()
     }
 
@@ -204,6 +228,14 @@ final class AppViewModel {
 
     func refreshTranscriptionRuntimeState() async {
         transcriptionRuntimeState = await transcriptionService.runtimeState(configuration: transcriptionConfiguration)
+    }
+
+    func refreshSummaryRuntimeState() async {
+        summaryRuntimeState = await summaryService.runtimeState(configuration: summaryConfiguration)
+    }
+
+    func refreshSummaryModelCatalogState() async {
+        summaryModelCatalogState = await summaryModelManager.catalogState()
     }
 
     func startQuickNote() {
@@ -278,6 +310,7 @@ final class AppViewModel {
                 let message = captureFailureMessage(for: note, permissions: permissions)
                 capturePermissionMessage = message
                 note.captureState.fail(reason: message, at: now, recoverable: true)
+                note.failLiveSession(message: message, at: now)
                 store.save(note)
                 refresh()
                 selectedNoteID = note.id
@@ -289,10 +322,17 @@ final class AppViewModel {
                 let mode: CaptureMode = requiresSystemAudio(for: note) ? .systemAudioAndMicrophone : .microphoneOnly
                 let session = try await captureEngine.startCapture(for: note.id, mode: mode)
                 note.captureState.beginCapture(at: session.startedAt)
+                note.beginLiveSession(
+                    at: session.startedAt,
+                    presentTranscriptPanel: note.liveSessionState.isTranscriptPanelPresented,
+                    tracksSystemAudio: mode == .systemAudioAndMicrophone
+                )
+                startLiveTranscription(for: session)
             } catch {
                 let message = error.localizedDescription
                 capturePermissionMessage = message
                 note.captureState.fail(reason: message, at: now, recoverable: true)
+                note.failLiveSession(message: message, at: now)
                 store.save(note)
                 refresh()
                 selectedNoteID = note.id
@@ -307,6 +347,7 @@ final class AppViewModel {
         case .capturing, .paused:
             capturePermissionMessage = nil
             note.captureState.permissions = capturePermissions
+            cancelLiveTranscription(for: note.id)
             let artifact: CaptureArtifact
             do {
                 artifact = try await captureEngine.stopCapture()
@@ -314,6 +355,7 @@ final class AppViewModel {
                 let message = error.localizedDescription
                 capturePermissionMessage = message
                 note.captureState.fail(reason: message, at: now, recoverable: true)
+                note.failLiveSession(message: message, at: now)
                 store.save(note)
                 refresh()
                 selectedNoteID = note.id
@@ -322,11 +364,19 @@ final class AppViewModel {
             }
 
             note.captureState.complete(at: artifact.endedAt)
+            let liveCompletionMessage: String?
+            if note.liveSessionState.status == .delayed || note.liveSessionState.hasPreviewEntries {
+                liveCompletionMessage = "Recording stopped. Oatmeal is reconciling the near-live transcript with the saved recording in the background."
+            } else {
+                liveCompletionMessage = nil
+            }
+            note.completeLiveSession(message: liveCompletionMessage, at: artifact.endedAt)
             var statusMessages: [String] = []
             if artifact.duration < 300 {
                 statusMessages.append("Short recording saved locally. Summaries are usually more useful once a meeting runs longer than five minutes.")
             }
 
+            summaryExecutionPlansByNoteID[note.id] = nil
             note.queueTranscription(at: artifact.endedAt)
             store.save(note)
             refresh()
@@ -367,6 +417,116 @@ final class AppViewModel {
         Task {
             await refreshTranscriptionRuntimeState()
         }
+    }
+
+    func setSummaryBackendPreference(_ preference: SummaryBackendPreference) {
+        summaryConfiguration.preferredBackend = preference
+        persistState()
+        Task {
+            await refreshSummaryRuntimeState()
+        }
+    }
+
+    func setSummaryExecutionPolicy(_ policy: SummaryExecutionPolicy) {
+        summaryConfiguration.executionPolicy = policy
+        persistState()
+        Task {
+            await refreshSummaryRuntimeState()
+        }
+    }
+
+    func setSummaryPreferredModelName(_ preferredModelName: String?) {
+        summaryConfiguration.preferredModelName = preferredModelName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        persistState()
+        Task {
+            await refreshSummaryRuntimeState()
+        }
+    }
+
+    func setLiveTranscriptPanelPresented(_ presented: Bool, for noteID: MeetingNote.ID) {
+        guard var note = store.note(id: noteID) else {
+            return
+        }
+
+        note.setLiveTranscriptPanelPresented(presented, updatedAt: nowProvider())
+        persist(note)
+    }
+
+    func installSummaryModel(_ entry: SummaryModelCatalogEntry, forceRedownload: Bool = false) {
+        guard activeSummaryModelOperation == nil else {
+            return
+        }
+
+        summaryModelManagementError = nil
+        activeSummaryModelOperation = SummaryModelOperationState(
+            kind: forceRedownload ? .updating : .downloading,
+            modelDisplayName: entry.displayName
+        )
+
+        summaryModelManagementTask?.cancel()
+        summaryModelManagementTask = Task {
+            do {
+                let catalogState = try await summaryModelManager.install(
+                    modelID: entry.id,
+                    forceRedownload: forceRedownload
+                )
+                summaryModelCatalogState = catalogState
+                summaryModelManagementError = nil
+                activeSummaryModelOperation = nil
+                await refreshSummaryRuntimeState()
+            } catch is CancellationError {
+                activeSummaryModelOperation = nil
+            } catch {
+                summaryModelManagementError = error.localizedDescription
+                activeSummaryModelOperation = nil
+                await refreshSummaryModelCatalogState()
+            }
+        }
+    }
+
+    func removeSummaryModel(_ installedModel: ManagedSummaryModel) {
+        guard activeSummaryModelOperation == nil else {
+            return
+        }
+
+        summaryModelManagementError = nil
+        activeSummaryModelOperation = SummaryModelOperationState(
+            kind: .removing,
+            modelDisplayName: installedModel.displayName
+        )
+
+        summaryModelManagementTask?.cancel()
+        summaryModelManagementTask = Task {
+            do {
+                let catalogState = try await summaryModelManager.remove(modelDirectoryURL: installedModel.directoryURL)
+                summaryModelCatalogState = catalogState
+
+                if summaryConfiguration.preferredModelName?.caseInsensitiveCompare(installedModel.displayName) == .orderedSame {
+                    summaryConfiguration.preferredModelName = nil
+                    persistState()
+                }
+
+                summaryModelManagementError = nil
+                activeSummaryModelOperation = nil
+                await refreshSummaryRuntimeState()
+            } catch is CancellationError {
+                activeSummaryModelOperation = nil
+            } catch {
+                summaryModelManagementError = error.localizedDescription
+                activeSummaryModelOperation = nil
+                await refreshSummaryModelCatalogState()
+            }
+        }
+    }
+
+    func summaryExecutionPlan(for note: MeetingNote) -> LocalSummaryExecutionPlan? {
+        summaryExecutionPlansByNoteID[note.id]
+    }
+
+    func summaryPlanSummary(for note: MeetingNote) -> String? {
+        summaryExecutionPlan(for: note)?.summary ?? summaryRuntimeState?.activePlanSummary
     }
 
     func setSelectedTemplate(_ template: NoteTemplate) {
@@ -424,6 +584,7 @@ final class AppViewModel {
         let now = nowProvider()
         note.transcriptionStatus = .idle
         note.generationStatus = .idle
+        summaryExecutionPlansByNoteID[note.id] = nil
         note.queueTranscription(at: now)
         persist(note)
 
@@ -433,7 +594,7 @@ final class AppViewModel {
                 recordingURL: recordingURL(for: note),
                 captureStartedAt: note.captureState.startedAt,
                 processingAnchorDate: now,
-                trigger: .manualRetry
+                trigger: .manualTranscriptionRetry
             )
         )
 
@@ -451,6 +612,7 @@ final class AppViewModel {
             ?? store.defaultTemplate
 
         note.generationStatus = .idle
+        summaryExecutionPlansByNoteID[note.id] = nil
         note.queueGeneration(templateID: template.id, at: now)
         persist(note)
 
@@ -460,7 +622,7 @@ final class AppViewModel {
                 recordingURL: recordingURL(for: note),
                 captureStartedAt: note.captureState.startedAt,
                 processingAnchorDate: now,
-                trigger: .manualRetry
+                trigger: .manualGenerationRetry
             )
         )
 
@@ -471,7 +633,8 @@ final class AppViewModel {
         let snapshot = persistence.loadOrEmpty()
         guard !snapshot.notes.isEmpty
             || snapshot.selectedTemplateID != nil
-            || snapshot.transcriptionConfiguration != .default else {
+            || snapshot.transcriptionConfiguration != .default
+            || snapshot.summaryConfiguration != .default else {
             return
         }
 
@@ -485,6 +648,7 @@ final class AppViewModel {
 
         selectedTemplateID = snapshot.selectedTemplateID
         transcriptionConfiguration = snapshot.transcriptionConfiguration
+        summaryConfiguration = snapshot.summaryConfiguration
     }
 
     private func persistState() {
@@ -492,7 +656,8 @@ final class AppViewModel {
             try persistence.save(
                 notes: store.allNotes(),
                 selectedTemplateID: selectedTemplateID,
-                transcriptionConfiguration: transcriptionConfiguration
+                transcriptionConfiguration: transcriptionConfiguration,
+                summaryConfiguration: summaryConfiguration
             )
         } catch {
             capturePermissionMessage = "Unable to save local state: \(error.localizedDescription)"
@@ -529,8 +694,349 @@ final class AppViewModel {
         }
     }
 
+    private func recoverLiveSessionsIfNeeded() {
+        let recoveredAt = nowProvider()
+
+        for var note in notes {
+            guard note.captureState.isActive else {
+                continue
+            }
+
+            cancelLiveTranscription(for: note.id)
+            guard captureEngine.activeSession?.noteID != note.id else {
+                continue
+            }
+
+            let message = "Oatmeal restored this live session after relaunch. Resume capture to continue recording and live transcription."
+            note.captureState.fail(reason: message, at: recoveredAt, recoverable: true)
+            note.recordLiveSessionInterruption(updatedAt: recoveredAt)
+            note.markLiveSessionRecovered(message: message, at: recoveredAt)
+            persist(note)
+        }
+    }
+
+    private func startLiveTranscription(for session: ActiveCaptureSession) {
+        cancelLiveTranscription(for: session.noteID)
+
+        liveTranscriptionTasks[session.noteID] = Task { [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: liveTranscriptionPollingIntervalNanoseconds)
+                } catch {
+                    return
+                }
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                await performLiveTranscriptionPass(noteID: session.noteID)
+            }
+        }
+    }
+
+    private func cancelLiveTranscription(for noteID: MeetingNote.ID) {
+        liveTranscriptionTasks.removeValue(forKey: noteID)?.cancel()
+    }
+
+    private func performLiveTranscriptionPass(noteID: MeetingNote.ID) async {
+        guard var note = store.note(id: noteID) else {
+            cancelLiveTranscription(for: noteID)
+            return
+        }
+
+        guard note.captureState.isActive else {
+            cancelLiveTranscription(for: noteID)
+            return
+        }
+
+        let handledRuntimeEvents = handleCaptureRuntimeEvents(for: &note)
+        if handledRuntimeEvents {
+            note = store.note(id: noteID) ?? note
+        }
+
+        let pendingChunks = pendingLiveChunks(for: note)
+        guard !pendingChunks.isEmpty else {
+            let metricsRefreshed = refreshLiveSessionMetrics(
+                for: &note,
+                pendingChunks: [],
+                updatedAt: nowProvider()
+            )
+            if metricsRefreshed {
+                persist(note)
+            }
+            return
+        }
+
+        var appendedEntries = 0
+
+        for (index, chunk) in pendingChunks.enumerated() {
+            let queuedBehindCurrentChunk = Array(pendingChunks.suffix(from: index + 1))
+            let queuedMetricsChanged = refreshLiveSessionMetrics(
+                for: &note,
+                pendingChunks: queuedBehindCurrentChunk,
+                updatedAt: nowProvider()
+            )
+            if queuedMetricsChanged {
+                persist(note)
+                note = store.note(id: noteID) ?? note
+            }
+
+            do {
+                let result = try await transcriptionService.transcribe(
+                    request: TranscriptionRequest(
+                        audioFileURL: chunk.fileURL,
+                        startedAt: chunk.startedAt,
+                        preferredLocaleIdentifier: transcriptionConfiguration.preferredLocaleIdentifier
+                    ),
+                    configuration: transcriptionConfiguration
+                )
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                note = store.note(id: noteID) ?? note
+                guard note.captureState.isActive else {
+                    cancelLiveTranscription(for: noteID)
+                    return
+                }
+
+                let updatedAt = nowProvider()
+                let previewEntries = result.segments.map { segment in
+                    LiveTranscriptEntry(
+                        createdAt: segment.startTime ?? chunk.startedAt,
+                        kind: .transcript,
+                        speakerName: segment.speakerName ?? chunk.source.defaultSpeakerName,
+                        text: segment.text
+                    )
+                }
+
+                for entry in previewEntries {
+                    note.appendLiveTranscriptEntry(entry, updatedAt: updatedAt)
+                }
+
+                appendedEntries += previewEntries.count
+                note.registerProcessedLiveChunkID(chunk.id, updatedAt: updatedAt)
+                note.recordMergedLiveChunk(updatedAt: updatedAt, sourceEndedAt: chunk.endedAt)
+                _ = refreshLiveSessionMetrics(
+                    for: &note,
+                    pendingChunks: pendingLiveChunks(for: note),
+                    updatedAt: updatedAt
+                )
+                note.markLiveSessionLive(
+                    message: previewEntries.isEmpty
+                        ? "Capture is active. Oatmeal saved another live chunk and is still preparing transcript text."
+                        : "Live transcript updated \(updatedAt.formatted(date: .omitted, time: .shortened)). Oatmeal merged a saved chunk into the in-meeting transcript preview.",
+                    at: updatedAt
+                )
+                persist(note)
+            } catch {
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                note = store.note(id: noteID) ?? note
+                let message = "Capture is still running. Oatmeal kept the recording safe and will retry the delayed live chunk in the background."
+                _ = refreshLiveSessionMetrics(
+                    for: &note,
+                    pendingChunks: pendingLiveChunks(for: note),
+                    updatedAt: nowProvider()
+                )
+                if note.liveSessionState.status != .delayed || note.liveSessionState.statusMessage != message {
+                    note.markLiveSessionDelayed(message: message, at: nowProvider())
+                    persist(note)
+                }
+                return
+            }
+        }
+
+        if appendedEntries == 0 {
+            note = store.note(id: noteID) ?? note
+            note.markLiveSessionLive(
+                message: "Capture is active. Oatmeal saved live chunks, but the local runtime has not emitted transcript text yet.",
+                at: nowProvider()
+            )
+            persist(note)
+        }
+    }
+
+    private func handleCaptureRuntimeEvents(for note: inout MeetingNote) -> Bool {
+        let events = captureEngine.consumeRuntimeEvents(for: note.id)
+        guard !events.isEmpty else {
+            return false
+        }
+
+        var didMutate = false
+        for event in events.sorted(by: { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            return lhs.createdAt < rhs.createdAt
+        }) {
+            updateLiveCaptureSourceHealth(for: &note, event: event)
+
+            switch event.kind {
+            case .degraded:
+                if shouldPauseCapture(for: note, event: event) {
+                    note.captureState.pause(at: event.createdAt)
+                    note.captureState.failureReason = event.message
+                }
+                note.markLiveSessionDelayed(message: event.message, at: event.createdAt)
+                appendLiveRuntimeMessageIfNeeded(event.message, to: &note, at: event.createdAt)
+            case .recovered:
+                recordRecoveredSourceActivityIfNeeded(for: &note, event: event)
+                if shouldResumeCapture(for: note, event: event) {
+                    note.captureState.resume(at: event.createdAt)
+                }
+                note.markLiveSessionRecovered(message: event.message, at: event.createdAt)
+            case .failed:
+                cancelLiveTranscription(for: note.id)
+                note.captureState.fail(reason: event.message, at: event.createdAt, recoverable: true)
+                note.failLiveSession(message: event.message, at: event.createdAt)
+                salvageInterruptedCaptureIfPossible(for: &note, at: event.createdAt)
+            }
+
+            if selectedNoteID == note.id {
+                capturePermissionMessage = captureRuntimeStatusMessage(for: note, event: event)
+            }
+            didMutate = true
+        }
+
+        if didMutate {
+            persist(note)
+        }
+
+        return didMutate
+    }
+
+    private func updateLiveCaptureSourceHealth(
+        for note: inout MeetingNote,
+        event: CaptureRuntimeEvent
+    ) {
+        let sourceStatus: LiveCaptureSourceStatus = switch event.kind {
+        case .degraded:
+            .delayed
+        case .recovered:
+            .recovered
+        case .failed:
+            .failed
+        }
+
+        switch event.source {
+        case .microphone:
+            note.updateLiveCaptureSource(.microphone, status: sourceStatus, message: event.message, updatedAt: event.createdAt)
+        case .systemAudio:
+            note.updateLiveCaptureSource(.systemAudio, status: sourceStatus, message: event.message, updatedAt: event.createdAt)
+        case .capturePipeline:
+            note.updateLiveCaptureSource(.microphone, status: sourceStatus, message: event.message, updatedAt: event.createdAt)
+            if requiresSystemAudio(for: note) {
+                note.updateLiveCaptureSource(.systemAudio, status: sourceStatus, message: event.message, updatedAt: event.createdAt)
+            }
+        }
+    }
+
+    private func recordRecoveredSourceActivityIfNeeded(
+        for note: inout MeetingNote,
+        event: CaptureRuntimeEvent
+    ) {
+        switch event.source {
+        case .microphone:
+            note.recordLiveCaptureSourceActivity(.microphone, updatedAt: event.createdAt)
+        case .systemAudio:
+            note.recordLiveCaptureSourceActivity(.systemAudio, updatedAt: event.createdAt)
+        case .capturePipeline:
+            note.recordLiveCaptureSourceActivity(.microphone, updatedAt: event.createdAt)
+            if requiresSystemAudio(for: note) {
+                note.recordLiveCaptureSourceActivity(.systemAudio, updatedAt: event.createdAt)
+            }
+        }
+    }
+
+    private func shouldPauseCapture(for note: MeetingNote, event: CaptureRuntimeEvent) -> Bool {
+        switch event.source {
+        case .capturePipeline:
+            false
+        case .microphone:
+            !requiresSystemAudio(for: note)
+        case .systemAudio:
+            false
+        }
+    }
+
+    private func shouldResumeCapture(for note: MeetingNote, event: CaptureRuntimeEvent) -> Bool {
+        switch event.source {
+        case .capturePipeline:
+            false
+        case .microphone:
+            !requiresSystemAudio(for: note)
+        case .systemAudio:
+            false
+        }
+    }
+
+    private func captureRuntimeStatusMessage(
+        for note: MeetingNote,
+        event: CaptureRuntimeEvent
+    ) -> String {
+        switch event.kind {
+        case .failed:
+            if note.processingState.isActive || note.transcriptionStatus == .pending {
+                return "\(event.message) Oatmeal is salvaging the saved local artifact in the background."
+            }
+            return event.message
+        case .degraded, .recovered:
+            return event.message
+        }
+    }
+
+    private func salvageInterruptedCaptureIfPossible(for note: inout MeetingNote, at date: Date) {
+        guard let recordingURL = captureEngine.recordingURL(for: note.id) else {
+            return
+        }
+
+        guard note.transcriptionStatus == .idle, !note.processingState.isActive else {
+            return
+        }
+
+        note.queueTranscription(at: date)
+        persist(note)
+
+        enqueuePostCaptureProcessing(
+            PostCaptureProcessingRequest(
+                noteID: note.id,
+                recordingURL: recordingURL,
+                captureStartedAt: note.captureState.startedAt,
+                processingAnchorDate: date,
+                trigger: .interruptedCapture
+            )
+        )
+    }
+
+    private func appendLiveRuntimeMessageIfNeeded(
+        _ message: String,
+        to note: inout MeetingNote,
+        at date: Date
+    ) {
+        if note.liveSessionState.previewEntries.last?.kind == .system,
+           note.liveSessionState.previewEntries.last?.text == message {
+            return
+        }
+
+        note.appendLiveTranscriptEntry(
+            LiveTranscriptEntry(
+                createdAt: date,
+                kind: .system,
+                text: message
+            ),
+            updatedAt: date
+        )
+    }
+
     private func noteNeedsPostCaptureRecovery(_ note: MeetingNote) -> Bool {
-        guard note.captureState.phase == .complete else {
+        guard note.captureState.phase == .complete || note.captureState.phase == .failed else {
             return false
         }
 
@@ -568,6 +1074,13 @@ final class AppViewModel {
 
         let processingDate = max(request.processingAnchorDate, nowProvider())
         var statusMessages: [String] = []
+        let liveChunkCatchUpCount = await catchUpPersistedLiveTranscriptionChunks(for: &note)
+        if liveChunkCatchUpCount > 0 {
+            statusMessages.append("Oatmeal caught up \(liveChunkCatchUpCount) delayed live transcript chunk\(liveChunkCatchUpCount == 1 ? "" : "s") from the saved local artifacts.")
+        }
+
+        note = store.note(id: request.noteID) ?? note
+        let recoveredLiveSegments = recoveredLiveTranscriptSegments(from: note)
 
         if note.transcriptionStatus != .succeeded {
             let transcriptionPlan: TranscriptionExecutionPlan?
@@ -594,6 +1107,10 @@ final class AppViewModel {
             }
 
             if note.transcriptionStatus != .failed {
+                if !recoveredLiveSegments.isEmpty {
+                    statusMessages.append("Oatmeal is reconciling the near-live transcript with the saved recording.")
+                }
+
                 do {
                     guard let recordingURL = request.recordingURL else {
                         throw PostCaptureProcessingError.missingRecordingArtifact(request.noteID)
@@ -626,15 +1143,27 @@ final class AppViewModel {
                         []
                     )
 
-                    note.recordTranscriptionFailure(
+                    let recoveredAt = nowProvider()
+                    if applyRecoveredLiveTranscriptIfAvailable(
+                        to: &note,
+                        segments: recoveredLiveSegments,
                         backend: fallbackPlan.0,
-                        executionKind: fallbackPlan.1,
-                        message: error.localizedDescription,
-                        warnings: fallbackPlan.2,
-                        at: nowProvider()
-                    )
-                    statusMessages.append("Recording saved locally, but transcription failed: \(error.localizedDescription)")
-                    persist(note)
+                        warningMessages: fallbackPlan.2,
+                        at: recoveredAt
+                    ) {
+                        statusMessages.append("Full recording transcription failed, but Oatmeal kept the recovered near-live transcript and continued processing.")
+                        persist(note)
+                    } else {
+                        note.recordTranscriptionFailure(
+                            backend: fallbackPlan.0,
+                            executionKind: fallbackPlan.1,
+                            message: error.localizedDescription,
+                            warnings: fallbackPlan.2,
+                            at: recoveredAt
+                        )
+                        statusMessages.append("Recording saved locally, but transcription failed: \(error.localizedDescription)")
+                        persist(note)
+                    }
                 }
             }
         }
@@ -653,15 +1182,24 @@ final class AppViewModel {
                 persist(note)
             }
 
-            if note.generationStatus != .pending {
-                note.beginGeneration(templateID: template.id, at: nowProvider())
-                persist(note)
-            }
-
             do {
-                let enhanced = try generator.generate(from: template.makeGenerationRequest(for: note))
-                note.applyEnhancedNote(enhanced, at: nowProvider())
+                let plan = try await summaryService.executionPlan(configuration: summaryConfiguration)
+                summaryExecutionPlansByNoteID[note.id] = plan
+
+                if note.generationStatus != .pending {
+                    note.beginGeneration(templateID: template.id, at: nowProvider())
+                    persist(note)
+                }
+
+                let result = try await summaryService.generate(
+                    request: template.makeGenerationRequest(for: note),
+                    configuration: summaryConfiguration
+                )
+                note.applyEnhancedNote(result.enhancedNote, at: nowProvider())
+                statusMessages.append(contentsOf: plan.warningMessages)
+                statusMessages.append(contentsOf: result.warningMessages)
             } catch {
+                summaryExecutionPlansByNoteID[note.id] = nil
                 note.recordGenerationFailure(error.localizedDescription, at: nowProvider())
                 statusMessages.append("Enhanced note generation failed: \(error.localizedDescription)")
             }
@@ -682,15 +1220,154 @@ final class AppViewModel {
 
         if selectedNoteID == note.id {
             switch request.trigger {
+            case .interruptedCapture:
+                statusMessages.insert("Capture ended unexpectedly, but Oatmeal resumed note processing from the saved local artifact.", at: 0)
             case .relaunchRecovery:
                 statusMessages.insert("Oatmeal resumed unfinished processing from the previous launch.", at: 0)
-            case .manualRetry:
-                statusMessages.insert("Manual retry finished.", at: 0)
+            case .manualTranscriptionRetry:
+                statusMessages.insert("Transcription retry finished.", at: 0)
+            case .manualGenerationRetry:
+                statusMessages.insert("Enhanced note retry finished.", at: 0)
             case .immediateAfterCapture:
                 break
             }
             capturePermissionMessage = buildStatusMessage(from: statusMessages)
         }
+    }
+
+    private func pendingLiveChunks(for note: MeetingNote) -> [LiveTranscriptionChunk] {
+        captureEngine.liveTranscriptionChunks(for: note.id)
+            .filter { !note.liveSessionState.hasProcessedChunkID($0.id) }
+            .sorted {
+                if $0.startedAt == $1.startedAt {
+                    return $0.id < $1.id
+                }
+                return $0.startedAt < $1.startedAt
+            }
+    }
+
+    @discardableResult
+    private func refreshLiveSessionMetrics(
+        for note: inout MeetingNote,
+        pendingChunks: [LiveTranscriptionChunk],
+        updatedAt: Date
+    ) -> Bool {
+        var didChange = false
+
+        if let snapshot = captureEngine.runtimeHealthSnapshot(for: note.id) {
+            if let microphoneLastActivityAt = snapshot.microphoneLastActivityAt {
+                didChange = note.recordLiveCaptureSourceActivity(
+                    .microphone,
+                    updatedAt: microphoneLastActivityAt
+                ) || didChange
+            }
+
+            if let systemAudioLastActivityAt = snapshot.systemAudioLastActivityAt {
+                didChange = note.recordLiveCaptureSourceActivity(
+                    .systemAudio,
+                    updatedAt: systemAudioLastActivityAt
+                ) || didChange
+            }
+        }
+
+        didChange = note.updateLiveChunkBacklog(
+            pendingChunkCount: pendingChunks.count,
+            oldestPendingChunkStartedAt: pendingChunks.first?.startedAt,
+            updatedAt: updatedAt
+        ) || didChange
+
+        return didChange
+    }
+
+    private func catchUpPersistedLiveTranscriptionChunks(for note: inout MeetingNote) async -> Int {
+        guard note.captureState.phase == .complete || note.captureState.phase == .failed else {
+            return 0
+        }
+
+        let pendingChunks = pendingLiveChunks(for: note)
+        guard !pendingChunks.isEmpty else {
+            let metricsRefreshed = refreshLiveSessionMetrics(
+                for: &note,
+                pendingChunks: [],
+                updatedAt: nowProvider()
+            )
+            if metricsRefreshed {
+                persist(note)
+            }
+            return 0
+        }
+
+        var processedChunkCount = 0
+
+        for (index, chunk) in pendingChunks.enumerated() {
+            let queuedBehindCurrentChunk = Array(pendingChunks.suffix(from: index + 1))
+            let queuedMetricsChanged = refreshLiveSessionMetrics(
+                for: &note,
+                pendingChunks: queuedBehindCurrentChunk,
+                updatedAt: nowProvider()
+            )
+            if queuedMetricsChanged {
+                persist(note)
+                note = store.note(id: note.id) ?? note
+            }
+
+            do {
+                let result = try await transcriptionService.transcribe(
+                    request: TranscriptionRequest(
+                        audioFileURL: chunk.fileURL,
+                        startedAt: chunk.startedAt,
+                        preferredLocaleIdentifier: transcriptionConfiguration.preferredLocaleIdentifier
+                    ),
+                    configuration: transcriptionConfiguration
+                )
+
+                let updatedAt = nowProvider()
+                let previewEntries = result.segments.map { segment in
+                    LiveTranscriptEntry(
+                        createdAt: segment.startTime ?? chunk.startedAt,
+                        kind: .transcript,
+                        speakerName: segment.speakerName ?? chunk.source.defaultSpeakerName,
+                        text: segment.text
+                    )
+                }
+
+                for entry in previewEntries {
+                    note.appendLiveTranscriptEntry(entry, updatedAt: updatedAt)
+                }
+
+                note.registerProcessedLiveChunkID(chunk.id, updatedAt: updatedAt)
+                note.recordMergedLiveChunk(updatedAt: updatedAt, sourceEndedAt: chunk.endedAt)
+                _ = refreshLiveSessionMetrics(
+                    for: &note,
+                    pendingChunks: pendingLiveChunks(for: note),
+                    updatedAt: updatedAt
+                )
+                processedChunkCount += 1
+                persist(note)
+            } catch {
+                _ = refreshLiveSessionMetrics(
+                    for: &note,
+                    pendingChunks: pendingLiveChunks(for: note),
+                    updatedAt: nowProvider()
+                )
+                note.markLiveSessionDelayed(
+                    message: "Oatmeal kept the recording safe. It will keep retrying delayed live chunks while the full note finishes processing.",
+                    at: nowProvider()
+                )
+                persist(note)
+                return processedChunkCount
+            }
+        }
+
+        if processedChunkCount > 0, note.captureState.phase == .complete {
+            note.completeLiveSession(
+                message: "Oatmeal finished catching up delayed live transcript chunks from the saved local artifacts.",
+                at: nowProvider()
+            )
+            persist(note)
+        }
+
+        return processedChunkCount
     }
 
     private func persist(_ note: MeetingNote) {
@@ -711,6 +1388,11 @@ final class AppViewModel {
             return
         }
 
+        if note.transcriptionHistory.last?.warningMessages.contains(recoveredLiveTranscriptWarning) == true {
+            statusMessages.append("Oatmeal kept the local recording because the note is using a recovered near-live transcript.")
+            return
+        }
+
         guard recordingURL(for: note) != nil else {
             return
         }
@@ -721,6 +1403,45 @@ final class AppViewModel {
         } catch {
             statusMessages.append("Processing succeeded, but Oatmeal could not clean up the saved recording: \(error.localizedDescription)")
         }
+    }
+
+    private func recoveredLiveTranscriptSegments(from note: MeetingNote) -> [TranscriptSegment] {
+        note.liveSessionState.previewEntries
+            .filter { $0.kind == .transcript }
+            .map { entry in
+                TranscriptSegment(
+                    startTime: entry.createdAt,
+                    endTime: entry.createdAt,
+                    speakerName: entry.speakerName,
+                    text: entry.text
+                )
+            }
+    }
+
+    private func applyRecoveredLiveTranscriptIfAvailable(
+        to note: inout MeetingNote,
+        segments: [TranscriptSegment],
+        backend: NoteTranscriptionBackend,
+        warningMessages: [String],
+        at updatedAt: Date
+    ) -> Bool {
+        guard !segments.isEmpty else {
+            return false
+        }
+
+        var warnings = warningMessages
+        if !warnings.contains(recoveredLiveTranscriptWarning) {
+            warnings.append(recoveredLiveTranscriptWarning)
+        }
+
+        note.applyTranscript(
+            segments,
+            backend: backend,
+            executionKind: .placeholder,
+            warnings: warnings,
+            at: updatedAt
+        )
+        return true
     }
 
     private func requiresSystemAudio(for note: MeetingNote) -> Bool {
@@ -789,5 +1510,37 @@ final class AppViewModel {
         }
 
         return filtered.joined(separator: " ")
+    }
+}
+
+struct SummaryModelOperationState: Equatable {
+    enum Kind: Equatable {
+        case downloading
+        case updating
+        case removing
+
+        var verb: String {
+            switch self {
+            case .downloading:
+                "Downloading"
+            case .updating:
+                "Updating"
+            case .removing:
+                "Removing"
+            }
+        }
+    }
+
+    var kind: Kind
+    var modelDisplayName: String
+
+    var message: String {
+        "\(kind.verb) \(modelDisplayName)…"
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        isEmpty ? nil : self
     }
 }

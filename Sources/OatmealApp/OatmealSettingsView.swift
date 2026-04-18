@@ -2,6 +2,8 @@ import OatmealEdge
 import SwiftUI
 
 struct OatmealSettingsView: View {
+    private static let automaticSummaryModelSelection = "__automatic_summary_model__"
+
     @Environment(AppViewModel.self) private var model
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("meetingReminderMinutes") private var meetingReminderMinutes = 1
@@ -71,6 +73,142 @@ struct OatmealSettingsView: View {
                 }
             }
 
+            Section("Enhanced Notes") {
+                Picker(
+                    "Backend",
+                    selection: Binding(
+                        get: { model.summaryConfiguration.preferredBackend },
+                        set: { model.setSummaryBackendPreference($0) }
+                    )
+                ) {
+                    ForEach(SummaryBackendPreference.allCases, id: \.self) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+
+                Picker(
+                    "Execution policy",
+                    selection: Binding(
+                        get: { model.summaryConfiguration.executionPolicy },
+                        set: { model.setSummaryExecutionPolicy($0) }
+                    )
+                ) {
+                    ForEach(SummaryExecutionPolicy.allCases, id: \.self) { policy in
+                        Text(policy.displayName).tag(policy)
+                    }
+                }
+
+                if let runtimeState = model.summaryRuntimeState {
+                    if runtimeState.discoveredModels.isEmpty {
+                        LabeledContent("MLX model", value: preferredSummaryModelLabel(for: runtimeState))
+                    } else {
+                        Picker(
+                            "MLX model",
+                            selection: Binding(
+                                get: { preferredSummaryModelSelection(for: runtimeState) },
+                                set: { selection in
+                                    model.setSummaryPreferredModelName(
+                                        selection == Self.automaticSummaryModelSelection ? nil : selection
+                                    )
+                                }
+                            )
+                        ) {
+                            Text("Auto").tag(Self.automaticSummaryModelSelection)
+                            ForEach(runtimeState.discoveredModels) { discoveredModel in
+                                Text(discoveredModel.displayName).tag(discoveredModel.displayName)
+                            }
+                        }
+
+                        if let unavailablePreferredModelName = unavailablePreferredSummaryModelName(for: runtimeState) {
+                            Text(
+                                "\(unavailablePreferredModelName) is no longer discovered locally. Oatmeal will use Auto until you choose another model."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text(runtimeState.activePlanSummary)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(runtimeState.backends) { backend in
+                        VStack(alignment: .leading, spacing: 4) {
+                            LabeledContent(backend.displayName, value: backend.availability.rawValue.capitalized)
+                            Text(backend.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    LabeledContent("Models folder", value: runtimeState.modelsDirectoryURL.path)
+
+                    if runtimeState.discoveredModels.isEmpty {
+                        Text("No local MLX-compatible summary models were discovered yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(runtimeState.discoveredModels) { model in
+                            LabeledContent(model.displayName, value: model.directoryURL.lastPathComponent)
+                        }
+                    }
+                } else {
+                    ProgressView("Inspecting summary runtime…")
+                }
+
+                if let catalogState = model.summaryModelCatalogState {
+                    LabeledContent("Model downloads", value: catalogState.downloadAvailability.rawValue.capitalized)
+                    Text(catalogState.downloadRuntimeDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let operation = model.activeSummaryModelOperation {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(operation.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = model.summaryModelManagementError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    ForEach(catalogState.items) { item in
+                        SummaryModelCatalogRow(
+                            item: item,
+                            preferredModelName: model.summaryConfiguration.preferredModelName,
+                            downloadsAvailable: catalogState.downloadAvailability == .available,
+                            isBusy: model.activeSummaryModelOperation != nil,
+                            onUse: {
+                                model.setSummaryPreferredModelName(item.catalogEntry.displayName)
+                            },
+                            onDownload: {
+                                model.installSummaryModel(item.catalogEntry)
+                            },
+                            onUpdate: {
+                                model.installSummaryModel(item.catalogEntry, forceRedownload: true)
+                            },
+                            onRemove: {
+                                guard let installedModel = item.installedModel else {
+                                    return
+                                }
+                                model.removeSummaryModel(installedModel)
+                            }
+                        )
+                    }
+
+                    Text("You can also place any MLX-compatible model folder directly into the managed summaries directory.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView("Inspecting model library…")
+                }
+            }
+
             Section("Sharing") {
                 Picker("Default link access", selection: $shareDefault) {
                     Text("Private").tag("private")
@@ -82,13 +220,135 @@ struct OatmealSettingsView: View {
             Section("Privacy") {
                 LabeledContent("Audio capture", value: "Local on this Mac")
                 LabeledContent("Transcription strategy", value: "Offline-first runtime plan with explicit fallback")
+                LabeledContent("Summary strategy", value: "Local structured notes with deterministic fallback")
                 LabeledContent("Model training", value: "Disabled for third-party providers")
             }
         }
         .task {
             await model.refreshTranscriptionRuntimeState()
+            await model.refreshSummaryRuntimeState()
+            await model.refreshSummaryModelCatalogState()
         }
         .formStyle(.grouped)
         .padding(20)
+    }
+
+    private func preferredSummaryModelSelection(for runtimeState: LocalSummaryRuntimeState) -> String {
+        let preferredModelName = runtimeState.preferredModelName
+            ?? model.summaryConfiguration.preferredModelName
+        guard let preferredModelName else {
+            return Self.automaticSummaryModelSelection
+        }
+
+        return runtimeState.discoveredModels.first(where: {
+            $0.displayName.caseInsensitiveCompare(preferredModelName) == .orderedSame
+        })?.displayName ?? Self.automaticSummaryModelSelection
+    }
+
+    private func preferredSummaryModelLabel(for runtimeState: LocalSummaryRuntimeState) -> String {
+        runtimeState.preferredModelName
+            ?? model.summaryConfiguration.preferredModelName
+            ?? "Auto"
+    }
+
+    private func unavailablePreferredSummaryModelName(for runtimeState: LocalSummaryRuntimeState) -> String? {
+        let preferredModelName = runtimeState.preferredModelName
+            ?? model.summaryConfiguration.preferredModelName
+        guard let preferredModelName else {
+            return nil
+        }
+
+        let isDiscovered = runtimeState.discoveredModels.contains {
+            $0.displayName.caseInsensitiveCompare(preferredModelName) == .orderedSame
+        }
+        return isDiscovered ? nil : preferredModelName
+    }
+}
+
+private struct SummaryModelCatalogRow: View {
+    let item: SummaryModelCatalogItemState
+    let preferredModelName: String?
+    let downloadsAvailable: Bool
+    let isBusy: Bool
+    let onUse: () -> Void
+    let onDownload: () -> Void
+    let onUpdate: () -> Void
+    let onRemove: () -> Void
+
+    private var isInstalled: Bool {
+        item.installedModel != nil
+    }
+
+    private var isSelected: Bool {
+        guard let preferredModelName else {
+            return false
+        }
+
+        return preferredModelName.caseInsensitiveCompare(item.catalogEntry.displayName) == .orderedSame
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(item.catalogEntry.displayName)
+                    .font(.headline)
+
+                if item.catalogEntry.recommended {
+                    badge("Recommended")
+                }
+
+                if isInstalled {
+                    badge("Installed")
+                }
+
+                if isSelected {
+                    badge("Selected")
+                }
+            }
+
+            Text(item.catalogEntry.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Text(item.catalogEntry.footprintDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                if let sizeBytes = item.installedModel?.sizeBytes {
+                    Text(ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 10) {
+                if isInstalled {
+                    if !isSelected {
+                        Button("Use", action: onUse)
+                            .disabled(isBusy)
+                    }
+
+                    Button("Update", action: onUpdate)
+                        .disabled(isBusy || !downloadsAvailable)
+
+                    Button("Remove", role: .destructive, action: onRemove)
+                        .disabled(isBusy)
+                } else {
+                    Button("Download", action: onDownload)
+                        .disabled(isBusy || !downloadsAvailable)
+                }
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
     }
 }
