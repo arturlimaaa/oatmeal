@@ -204,6 +204,145 @@ public struct SourceCitation: Codable, Equatable, Hashable, Sendable, Identifiab
     }
 }
 
+public enum NoteAssistantTurnStatus: String, Codable, Equatable, Sendable {
+    case pending
+    case completed
+    case failed
+
+    public var displayLabel: String {
+        switch self {
+        case .pending:
+            "Generating"
+        case .completed:
+            "Ready"
+        case .failed:
+            "Failed"
+        }
+    }
+}
+
+public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var prompt: String
+    public var response: String?
+    public var requestedAt: Date
+    public var completedAt: Date?
+    public var status: NoteAssistantTurnStatus
+    public var failureMessage: String?
+
+    public init(
+        id: UUID = UUID(),
+        prompt: String,
+        response: String? = nil,
+        requestedAt: Date = Date(),
+        completedAt: Date? = nil,
+        status: NoteAssistantTurnStatus,
+        failureMessage: String? = nil
+    ) {
+        self.id = id
+        self.prompt = prompt
+        self.response = response
+        self.requestedAt = requestedAt
+        self.completedAt = completedAt
+        self.status = status
+        self.failureMessage = failureMessage
+    }
+}
+
+public struct NoteAssistantThread: Codable, Equatable, Sendable {
+    public var turns: [NoteAssistantTurn]
+    public var updatedAt: Date?
+
+    public init(
+        turns: [NoteAssistantTurn] = [],
+        updatedAt: Date? = nil
+    ) {
+        self.turns = turns
+        self.updatedAt = updatedAt
+    }
+
+    public static let empty = NoteAssistantThread()
+
+    public var hasConversation: Bool {
+        !turns.isEmpty
+    }
+
+    public var hasPendingTurn: Bool {
+        turns.contains(where: { $0.status == .pending })
+    }
+
+    @discardableResult
+    public mutating func submitPrompt(
+        _ prompt: String,
+        at date: Date = Date()
+    ) -> UUID {
+        let turn = NoteAssistantTurn(
+            prompt: prompt,
+            requestedAt: date,
+            status: .pending
+        )
+        turns.append(turn)
+        updatedAt = date
+        return turn.id
+    }
+
+    @discardableResult
+    public mutating func completeTurn(
+        id: UUID,
+        response: String,
+        at date: Date = Date()
+    ) -> Bool {
+        guard let index = turns.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+
+        turns[index].response = response
+        turns[index].completedAt = date
+        turns[index].status = .completed
+        turns[index].failureMessage = nil
+        updatedAt = date
+        return true
+    }
+
+    @discardableResult
+    public mutating func failTurn(
+        id: UUID,
+        message: String,
+        at date: Date = Date()
+    ) -> Bool {
+        guard let index = turns.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+
+        turns[index].completedAt = date
+        turns[index].status = .failed
+        turns[index].failureMessage = message
+        updatedAt = date
+        return true
+    }
+
+    @discardableResult
+    public mutating func failPendingTurnsForRelaunchRecovery(
+        message: String,
+        at date: Date = Date()
+    ) -> Bool {
+        var didChange = false
+
+        for index in turns.indices where turns[index].status == .pending {
+            turns[index].completedAt = date
+            turns[index].status = .failed
+            turns[index].failureMessage = message
+            didChange = true
+        }
+
+        if didChange {
+            updatedAt = date
+        }
+
+        return didChange
+    }
+}
+
 public struct EnhancedNote: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var generatedAt: Date
@@ -1160,6 +1299,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public var transcriptSegments: [TranscriptSegment]
     public var liveSessionState: LiveSessionState
     public var enhancedNote: EnhancedNote?
+    public var assistantThread: NoteAssistantThread
     public var transcriptionHistory: [NoteTranscriptionAttempt]
     public var generationHistory: [NoteGenerationAttempt]
     public var processingState: PostCaptureProcessingState
@@ -1181,6 +1321,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         transcriptSegments: [TranscriptSegment] = [],
         liveSessionState: LiveSessionState = .idle,
         enhancedNote: EnhancedNote? = nil,
+        assistantThread: NoteAssistantThread = .empty,
         transcriptionHistory: [NoteTranscriptionAttempt] = [],
         generationHistory: [NoteGenerationAttempt] = [],
         processingState: PostCaptureProcessingState = .idle,
@@ -1201,6 +1342,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         self.transcriptSegments = transcriptSegments
         self.liveSessionState = liveSessionState
         self.enhancedNote = enhancedNote
+        self.assistantThread = assistantThread
         self.transcriptionHistory = transcriptionHistory
         self.generationHistory = generationHistory
         self.processingState = processingState
@@ -1223,6 +1365,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         case transcriptSegments
         case liveSessionState
         case enhancedNote
+        case assistantThread
         case transcriptionHistory
         case generationHistory
         case processingState
@@ -1246,6 +1389,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         transcriptSegments = try container.decodeIfPresent([TranscriptSegment].self, forKey: .transcriptSegments) ?? []
         liveSessionState = try container.decodeIfPresent(LiveSessionState.self, forKey: .liveSessionState) ?? .idle
         enhancedNote = try container.decodeIfPresent(EnhancedNote.self, forKey: .enhancedNote)
+        assistantThread = try container.decodeIfPresent(NoteAssistantThread.self, forKey: .assistantThread) ?? .empty
         transcriptionHistory = try container.decodeIfPresent([NoteTranscriptionAttempt].self, forKey: .transcriptionHistory) ?? []
         generationHistory = try container.decodeIfPresent([NoteGenerationAttempt].self, forKey: .generationHistory) ?? []
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
@@ -1276,6 +1420,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         try container.encode(transcriptSegments, forKey: .transcriptSegments)
         try container.encode(liveSessionState, forKey: .liveSessionState)
         try container.encodeIfPresent(enhancedNote, forKey: .enhancedNote)
+        try container.encode(assistantThread, forKey: .assistantThread)
         try container.encode(transcriptionHistory, forKey: .transcriptionHistory)
         try container.encode(generationHistory, forKey: .generationHistory)
         try container.encode(processingState, forKey: .processingState)
@@ -1307,6 +1452,14 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         processingState.needsRelaunchRecovery
     }
 
+    public var isAIWorkspaceAvailable: Bool {
+        hasRawNotes || hasTranscript || enhancedNote != nil || hasLiveTranscriptPreview
+    }
+
+    public var hasPendingAssistantTurn: Bool {
+        assistantThread.hasPendingTurn
+    }
+
     public mutating func assignFolder(_ folderID: UUID?, updatedAt: Date = Date()) {
         self.folderID = folderID
         self.updatedAt = updatedAt
@@ -1315,6 +1468,57 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public mutating func replaceRawNotes(_ text: String, updatedAt: Date = Date()) {
         rawNotes = text
         self.updatedAt = updatedAt
+    }
+
+    @discardableResult
+    public mutating func submitAssistantPrompt(
+        _ prompt: String,
+        at updatedAt: Date = Date()
+    ) -> UUID {
+        let turnID = assistantThread.submitPrompt(prompt, at: updatedAt)
+        self.updatedAt = updatedAt
+        return turnID
+    }
+
+    @discardableResult
+    public mutating func completeAssistantTurn(
+        id: UUID,
+        response: String,
+        at updatedAt: Date = Date()
+    ) -> Bool {
+        let didChange = assistantThread.completeTurn(id: id, response: response, at: updatedAt)
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func failAssistantTurn(
+        id: UUID,
+        message: String,
+        at updatedAt: Date = Date()
+    ) -> Bool {
+        let didChange = assistantThread.failTurn(id: id, message: message, at: updatedAt)
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
+    }
+
+    @discardableResult
+    public mutating func prepareAssistantThreadForRelaunchRecovery(
+        message: String,
+        at updatedAt: Date = Date()
+    ) -> Bool {
+        let didChange = assistantThread.failPendingTurnsForRelaunchRecovery(
+            message: message,
+            at: updatedAt
+        )
+        if didChange {
+            self.updatedAt = updatedAt
+        }
+        return didChange
     }
 
     public mutating func appendTranscriptSegment(_ segment: TranscriptSegment, updatedAt: Date = Date()) {

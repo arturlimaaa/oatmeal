@@ -23,15 +23,18 @@ final class AppViewModel {
     private let transcriptionService: any LocalTranscriptionServicing
     private let summaryService: any LocalSummaryServicing
     private let summaryModelManager: any LocalSummaryModelManaging
+    private let assistantService: any SingleMeetingAssistantServicing
     private let persistence: AppPersistence
     private let nowProvider: () -> Date
     private let liveTranscriptionPollingIntervalNanoseconds: UInt64
     @ObservationIgnored private var processingTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
     @ObservationIgnored private var liveTranscriptionTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var assistantTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
     @ObservationIgnored private var openWindowAction: ((String) -> Void)?
     @ObservationIgnored private var dismissWindowAction: ((String) -> Void)?
     private let recoveredLiveTranscriptWarning = "Final recording transcription did not complete, so Oatmeal kept the recovered near-live transcript preview. Retry transcription later for a full pass."
     private let meetingEndedSuggestionMessage = "Oatmeal thinks this meeting may have ended. Stop recording when you are ready, or keep recording if the conversation is still going."
+    private let interruptedAssistantTurnMessage = "Oatmeal was relaunched before this answer completed. Ask again to regenerate it."
     @ObservationIgnored private var summaryModelManagementTask: Task<Void, Never>?
     @ObservationIgnored private var hasStartedNativeMeetingDetection = false
     @ObservationIgnored private var hasStartedBrowserMeetingDetection = false
@@ -78,7 +81,8 @@ final class AppViewModel {
         summaryModelManager: (any LocalSummaryModelManaging)? = nil,
         persistence: AppPersistence = .shared,
         nowProvider: @escaping () -> Date = Date.init,
-        liveTranscriptionPollingInterval: TimeInterval = 4
+        liveTranscriptionPollingInterval: TimeInterval = 4,
+        assistantService: (any SingleMeetingAssistantServicing)? = nil
     ) {
         self.store = store
         self.calendarService = calendarService
@@ -101,6 +105,7 @@ final class AppViewModel {
         self.summaryModelManager = summaryModelManager ?? LocalSummaryModelManager(
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
+        self.assistantService = assistantService ?? PlaceholderSingleMeetingAssistantService()
 
         restorePersistedState()
         refresh()
@@ -1054,6 +1059,70 @@ final class AppViewModel {
         capturePermissionMessage = "Retrying enhanced note generation."
     }
 
+    func submitAssistantPrompt(_ prompt: String, for noteID: MeetingNote.ID) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty,
+              var note = store.note(id: noteID),
+              note.isAIWorkspaceAvailable,
+              !note.hasPendingAssistantTurn else {
+            return
+        }
+
+        let requestedAt = nowProvider()
+        let turnID = note.submitAssistantPrompt(trimmedPrompt, at: requestedAt)
+        persist(note)
+
+        assistantTasks[noteID]?.cancel()
+        assistantTasks[noteID] = Task { [assistantService, weak self] in
+            do {
+                let response = try await assistantService.respond(
+                    to: SingleMeetingAssistantRequest(
+                        noteID: note.id,
+                        noteTitle: note.title,
+                        prompt: trimmedPrompt,
+                        rawNotes: note.rawNotes,
+                        transcriptSegments: note.transcriptSegments,
+                        enhancedNote: note.enhancedNote
+                    )
+                )
+
+                await MainActor.run {
+                    guard let self, var latestNote = self.store.note(id: noteID) else {
+                        self?.assistantTasks[noteID] = nil
+                        return
+                    }
+
+                    _ = latestNote.completeAssistantTurn(
+                        id: turnID,
+                        response: response.text,
+                        at: response.generatedAt
+                    )
+                    self.persist(latestNote)
+                    self.assistantTasks[noteID] = nil
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self?.assistantTasks[noteID] = nil
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, var latestNote = self.store.note(id: noteID) else {
+                        self?.assistantTasks[noteID] = nil
+                        return
+                    }
+
+                    _ = latestNote.failAssistantTurn(
+                        id: turnID,
+                        message: error.localizedDescription,
+                        at: self.nowProvider()
+                    )
+                    self.persist(latestNote)
+                    self.assistantTasks[noteID] = nil
+                }
+            }
+        }
+    }
+
     private func restorePersistedState() {
         let snapshot = persistence.loadOrEmpty()
         guard !snapshot.notes.isEmpty
@@ -1073,7 +1142,11 @@ final class AppViewModel {
             store.delete(noteID: existing.id)
         }
 
-        for note in snapshot.notes {
+        for var note in snapshot.notes {
+            _ = note.prepareAssistantThreadForRelaunchRecovery(
+                message: interruptedAssistantTurnMessage,
+                at: nowProvider()
+            )
             store.save(note)
         }
 

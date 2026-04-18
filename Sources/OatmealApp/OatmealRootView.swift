@@ -173,6 +173,7 @@ struct OatmealRootView: View {
                     canRetryTranscription: model.canRetryTranscription(for: note),
                     canRetryGeneration: model.canRetryGeneration(for: note),
                     setLiveTranscriptPanelPresented: { model.setLiveTranscriptPanelPresented($0, for: note.id) },
+                    submitAssistantPrompt: { model.submitAssistantPrompt($0, for: note.id) },
                     retryTranscription: { model.retryTranscription() },
                     retryGeneration: { model.retryGeneration() }
                 )
@@ -647,9 +648,11 @@ private struct MeetingDetailView: View {
     let canRetryTranscription: Bool
     let canRetryGeneration: Bool
     let setLiveTranscriptPanelPresented: (Bool) -> Void
+    let submitAssistantPrompt: (String) -> Void
     let retryTranscription: () -> Void
     let retryGeneration: () -> Void
     @State private var isLiveTranscriptPanelExpanded = false
+    @State private var assistantPrompt = ""
 
     private var liveTranscriptPanelState: LiveTranscriptPanelState? {
         LiveTranscriptPanelAdapter.panelState(for: note)
@@ -664,6 +667,9 @@ private struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 header
                 summaryCards
+                if note.isAIWorkspaceAvailable {
+                    aiWorkspaceSection
+                }
                 metadataSection
                 captureSection
                 if let liveTranscriptPanelState {
@@ -690,6 +696,7 @@ private struct MeetingDetailView: View {
         }
         .onChange(of: note.id) { _, _ in
             isLiveTranscriptPanelExpanded = note.liveSessionState.isTranscriptPanelPresented
+            assistantPrompt = ""
         }
         .onChange(of: isLiveTranscriptPanelPresented) { _, newValue in
             isLiveTranscriptPanelExpanded = newValue
@@ -798,6 +805,65 @@ private struct MeetingDetailView: View {
                 LabeledContent("Transcription status", value: note.transcriptionStatus.displayLabel)
                 LabeledContent("Generation status", value: note.generationStatus.displayLabel)
                 LabeledContent("Summary runtime", value: summaryExecutionPlan?.backend.displayName ?? summaryConfiguration.preferredBackend.displayName)
+            }
+        }
+    }
+
+    private var aiWorkspaceSection: some View {
+        DetailCard(title: "AI Workspace") {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Ask Oatmeal about this meeting. This first slice keeps the thread scoped to one note and saves each prompt and answer locally with the note.")
+                    .foregroundStyle(.secondary)
+
+                if note.assistantThread.turns.isEmpty {
+                    Text("No assistant prompts yet. Ask for a recap, a draft follow-up, or a quick explanation of what changed in this meeting.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(note.assistantThread.turns) { turn in
+                            AssistantWorkspaceTurnView(turn: turn)
+                        }
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Prompt")
+                        .font(.headline)
+
+                    TextEditor(text: $assistantPrompt)
+                        .font(.body)
+                        .frame(minHeight: 80)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.secondary.opacity(0.18))
+                        )
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text(note.hasPendingAssistantTurn
+                             ? "Oatmeal is generating the latest answer for this note."
+                             : "Responses stay attached to this meeting and will survive relaunch.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button("Send") {
+                            let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !prompt.isEmpty else {
+                                return
+                            }
+                            assistantPrompt = ""
+                            submitAssistantPrompt(prompt)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || note.hasPendingAssistantTurn
+                        )
+                    }
+                }
             }
         }
     }
@@ -2465,6 +2531,102 @@ private extension PermissionStatus {
             "Denied"
         case .restricted:
             "Restricted"
+        }
+    }
+}
+
+private struct AssistantWorkspaceTurnView: View {
+    let turn: NoteAssistantTurn
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text("You")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text(turn.requestedAt.formatted(date: .omitted, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(turn.prompt)
+                    .font(.body)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.accentColor.opacity(0.08))
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    Label("Oatmeal", systemImage: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    AssistantTurnStatusBadge(status: turn.status)
+
+                    Spacer()
+
+                    if let completedAt = turn.completedAt {
+                        Text(completedAt.formatted(date: .omitted, time: .shortened))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                switch turn.status {
+                case .pending:
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Generating a note-scoped answer for this meeting.")
+                            .foregroundStyle(.secondary)
+                    }
+                case .completed:
+                    Text(turn.response ?? "No assistant response was saved for this turn.")
+                        .foregroundStyle(.primary)
+                case .failed:
+                    Text(turn.failureMessage ?? "Oatmeal could not complete this answer.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.secondary.opacity(0.08))
+            )
+        }
+    }
+}
+
+private struct AssistantTurnStatusBadge: View {
+    let status: NoteAssistantTurnStatus
+
+    var body: some View {
+        Text(status.displayLabel)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(badgeColor.opacity(0.12))
+            .foregroundStyle(badgeColor)
+            .clipShape(Capsule())
+    }
+
+    private var badgeColor: Color {
+        switch status {
+        case .pending:
+            .orange
+        case .completed:
+            .green
+        case .failed:
+            .pink
         }
     }
 }

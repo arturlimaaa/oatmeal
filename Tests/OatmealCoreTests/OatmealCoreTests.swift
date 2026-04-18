@@ -158,6 +158,63 @@ final class OatmealCoreTests: XCTestCase {
         XCTAssertNil(note.processingState.startedAt)
     }
 
+    func testAIWorkspaceAvailabilityRequiresMeetingMaterial() {
+        let emptyNote = MeetingNote(
+            title: "Empty note",
+            origin: .quickNote(createdAt: date(1_700_020_000))
+        )
+        XCTAssertFalse(emptyNote.isAIWorkspaceAvailable)
+
+        let rawNotesNote = MeetingNote(
+            title: "Raw notes note",
+            origin: .quickNote(createdAt: date(1_700_020_100)),
+            rawNotes: "Need follow-up on the launch checklist."
+        )
+        XCTAssertTrue(rawNotesNote.isAIWorkspaceAvailable)
+
+        let transcriptNote = MeetingNote(
+            title: "Transcript note",
+            origin: .quickNote(createdAt: date(1_700_020_200)),
+            transcriptSegments: [TranscriptSegment(text: "We should finalize this week.")]
+        )
+        XCTAssertTrue(transcriptNote.isAIWorkspaceAvailable)
+
+        let enhancedNote = MeetingNote(
+            title: "Enhanced note",
+            origin: .quickNote(createdAt: date(1_700_020_300)),
+            enhancedNote: EnhancedNote(summary: "Wrapped up the release schedule.")
+        )
+        XCTAssertTrue(enhancedNote.isAIWorkspaceAvailable)
+    }
+
+    func testAssistantThreadCanRecoverPendingTurnAfterRelaunch() {
+        let startedAt = date(1_700_020_400)
+        var note = MeetingNote(
+            title: "Assistant note",
+            origin: .quickNote(createdAt: startedAt),
+            rawNotes: "### Context\n- finalize onboarding copy"
+        )
+
+        let turnID = note.submitAssistantPrompt("Summarize the ask", at: startedAt)
+        XCTAssertTrue(note.hasPendingAssistantTurn)
+
+        XCTAssertTrue(
+            note.prepareAssistantThreadForRelaunchRecovery(
+                message: "Oatmeal was relaunched before this answer completed.",
+                at: date(1_700_020_450)
+            )
+        )
+
+        XCTAssertFalse(note.hasPendingAssistantTurn)
+        XCTAssertEqual(note.assistantThread.turns.count, 1)
+        XCTAssertEqual(note.assistantThread.turns[0].id, turnID)
+        XCTAssertEqual(note.assistantThread.turns[0].status, .failed)
+        XCTAssertEqual(
+            note.assistantThread.turns[0].failureMessage,
+            "Oatmeal was relaunched before this answer completed."
+        )
+    }
+
     func testLegacyPendingTranscriptionDecodesRecoverableProcessingState() throws {
         let noteID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let originCreatedAt = date(1_700_000_000)
