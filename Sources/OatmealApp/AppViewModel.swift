@@ -6,6 +6,13 @@ import OatmealEdge
 @MainActor
 @Observable
 final class AppViewModel {
+    enum LightweightSurfaceMainWindowRoute: Equatable, Sendable {
+        case session(noteID: MeetingNote.ID, opensTranscript: Bool)
+        case note(noteID: MeetingNote.ID)
+        case upcoming(eventID: CalendarEvent.ID)
+        case library
+    }
+
     private let store: InMemoryOatmealStore
     private let calendarService: CalendarAccessServing
     private let captureService: CaptureAccessServing
@@ -44,6 +51,8 @@ final class AppViewModel {
     var selectedNoteID: MeetingNote.ID?
     var selectedTemplateID: NoteTemplate.ID?
     var searchText = ""
+    var dismissedSessionControllerPresentationIdentity: String?
+    var collapsedSessionControllerPresentationIdentity: String?
 
     init(
         store: InMemoryOatmealStore = .preview(),
@@ -78,7 +87,9 @@ final class AppViewModel {
 
         restorePersistedState()
         refresh()
-        selectedNoteID = notes.first?.id
+        if selectedNoteID == nil {
+            selectedNoteID = notes.first?.id
+        }
     }
 
     var filteredNotes: [MeetingNote] {
@@ -132,6 +143,40 @@ final class AppViewModel {
         set { selectedTemplateID = newValue?.id }
     }
 
+    var sessionControllerState: SessionControllerState? {
+        SessionControllerAdapter.controllerState(for: notes, selectedNoteID: selectedNoteID)
+    }
+
+    var menuBarSessionState: SessionControllerState? {
+        SessionControllerAdapter.menuBarState(
+            for: notes,
+            selectedNoteID: selectedNoteID,
+            referenceDate: nowProvider()
+        )
+    }
+
+    var menuBarSymbolName: String {
+        menuBarSessionState?.menuBarSymbolName ?? "circle.fill"
+    }
+
+    var shouldAutoPresentSessionControllerOnLaunch: Bool {
+        sessionControllerState != nil && !isSessionControllerDismissedForCurrentState
+    }
+
+    var isSessionControllerCollapsed: Bool {
+        guard let state = sessionControllerState else {
+            return false
+        }
+        return collapsedSessionControllerPresentationIdentity == state.presentationIdentity
+    }
+
+    var isSessionControllerDismissedForCurrentState: Bool {
+        guard let state = sessionControllerState else {
+            return false
+        }
+        return dismissedSessionControllerPresentationIdentity == state.presentationIdentity
+    }
+
     func folder(for note: MeetingNote) -> NoteFolder? {
         guard let folderID = note.folderID else {
             return nil
@@ -147,13 +192,114 @@ final class AppViewModel {
         captureEngine.recordingURL(for: note.id)
     }
 
+    func focusSessionControllerNote(openTranscript: Bool = false) {
+        guard let state = sessionControllerState else {
+            return
+        }
+
+        selectedSidebarItem = .allNotes
+        selectedNoteID = state.noteID
+        if openTranscript {
+            setLiveTranscriptPanelPresented(true, for: state.noteID)
+        }
+        persistState()
+    }
+
+    @discardableResult
+    func routeMainWindowFromLightweightSurface(
+        openTranscript: Bool = false
+    ) -> LightweightSurfaceMainWindowRoute {
+        if let state = sessionControllerState {
+            selectedSidebarItem = .allNotes
+            selectedNoteID = state.noteID
+            let shouldOpenTranscript = openTranscript && state.canOpenTranscript
+            if shouldOpenTranscript {
+                setLiveTranscriptPanelPresented(true, for: state.noteID)
+            }
+            persistState()
+            return .session(noteID: state.noteID, opensTranscript: shouldOpenTranscript)
+        }
+
+        if let state = menuBarSessionState {
+            selectedSidebarItem = .allNotes
+            selectedNoteID = state.noteID
+            if openTranscript && state.canOpenTranscript {
+                setLiveTranscriptPanelPresented(true, for: state.noteID)
+            }
+            persistState()
+            return .note(noteID: state.noteID)
+        }
+
+        if let selectedNote {
+            selectedSidebarItem = .allNotes
+            selectedNoteID = selectedNote.id
+            persistState()
+            return .note(noteID: selectedNote.id)
+        }
+
+        if let firstNote = notes.first {
+            selectedSidebarItem = .allNotes
+            selectedNoteID = firstNote.id
+            persistState()
+            return .note(noteID: firstNote.id)
+        }
+
+        if let upcomingEvent = selectedUpcomingEvent ?? filteredUpcomingMeetings.first ?? upcomingMeetings.first {
+            selectedSidebarItem = .upcoming
+            selectedUpcomingEventID = upcomingEvent.id
+            persistState()
+            return .upcoming(eventID: upcomingEvent.id)
+        }
+
+        selectedSidebarItem = .allNotes
+        selectedNoteID = nil
+        persistState()
+        return .library
+    }
+
+    func startQuickNoteCapture() async {
+        startQuickNote()
+        await toggleCapture()
+    }
+
+    func stopSessionControllerCapture() async {
+        guard let state = sessionControllerState, state.canStopCapture else {
+            return
+        }
+
+        selectedSidebarItem = .allNotes
+        selectedNoteID = state.noteID
+        await toggleCapture()
+    }
+
+    func stopSessionControllerCaptureForTermination() async -> Bool {
+        guard let state = sessionControllerState else {
+            return true
+        }
+
+        guard state.canStopCapture else {
+            return true
+        }
+
+        let activeNoteID = state.noteID
+        await stopSessionControllerCapture()
+
+        if let note = notes.first(where: { $0.id == activeNoteID }) {
+            return note.captureState.phase == .complete || note.processingState.isActive
+        }
+
+        return sessionControllerState?.canStopCapture != true
+    }
+
     func selectFirstAvailableNote() {
         selectedNoteID = filteredNotes.first?.id
+        persistState()
     }
 
     func selectFirstUpcomingMeetingIfNeeded() {
         if selectedUpcomingEventID == nil {
             selectedUpcomingEventID = filteredUpcomingMeetings.first?.id
+            persistState()
         }
     }
 
@@ -161,10 +307,60 @@ final class AppViewModel {
         folders = store.folders
         notes = store.allNotes()
         templates = store.allTemplates()
+        reconcileSessionControllerPresentationState()
 
         if selectedTemplateID == nil {
             selectedTemplateID = templates.first?.id
         }
+    }
+
+    func dismissSessionController() {
+        guard let state = sessionControllerState else {
+            return
+        }
+
+        dismissedSessionControllerPresentationIdentity = state.presentationIdentity
+        persistState()
+    }
+
+    func reopenSessionController() {
+        dismissedSessionControllerPresentationIdentity = nil
+        persistState()
+    }
+
+    func toggleSessionControllerCollapsed() {
+        guard let state = sessionControllerState else {
+            collapsedSessionControllerPresentationIdentity = nil
+            return
+        }
+
+        if collapsedSessionControllerPresentationIdentity == state.presentationIdentity {
+            collapsedSessionControllerPresentationIdentity = nil
+        } else {
+            collapsedSessionControllerPresentationIdentity = state.presentationIdentity
+            dismissedSessionControllerPresentationIdentity = nil
+        }
+        persistState()
+    }
+
+    func setSelectedSidebarItem(_ item: SidebarItem) {
+        selectedSidebarItem = item
+        persistState()
+    }
+
+    func setSelectedUpcomingEventID(_ id: CalendarEvent.ID?) {
+        selectedUpcomingEventID = id
+        persistState()
+    }
+
+    func setSelectedNoteID(_ id: MeetingNote.ID?) {
+        selectedNoteID = id
+        persistState()
+    }
+
+    func setSelectedTemplateID(_ id: NoteTemplate.ID?) {
+        selectedTemplateID = id
+        persistState()
     }
 
     func loadSystemState() async {
@@ -632,7 +828,11 @@ final class AppViewModel {
     private func restorePersistedState() {
         let snapshot = persistence.loadOrEmpty()
         guard !snapshot.notes.isEmpty
+            || snapshot.selectedSidebarItem != nil
+            || snapshot.selectedUpcomingEventID != nil
+            || snapshot.selectedNoteID != nil
             || snapshot.selectedTemplateID != nil
+            || snapshot.collapsedSessionControllerPresentationIdentity != nil
             || snapshot.transcriptionConfiguration != .default
             || snapshot.summaryConfiguration != .default else {
             return
@@ -646,7 +846,11 @@ final class AppViewModel {
             store.save(note)
         }
 
+        selectedSidebarItem = snapshot.selectedSidebarItem ?? .upcoming
+        selectedUpcomingEventID = snapshot.selectedUpcomingEventID
+        selectedNoteID = snapshot.selectedNoteID
         selectedTemplateID = snapshot.selectedTemplateID
+        collapsedSessionControllerPresentationIdentity = snapshot.collapsedSessionControllerPresentationIdentity
         transcriptionConfiguration = snapshot.transcriptionConfiguration
         summaryConfiguration = snapshot.summaryConfiguration
     }
@@ -655,12 +859,32 @@ final class AppViewModel {
         do {
             try persistence.save(
                 notes: store.allNotes(),
+                selectedSidebarItem: selectedSidebarItem,
+                selectedUpcomingEventID: selectedUpcomingEventID,
+                selectedNoteID: selectedNoteID,
                 selectedTemplateID: selectedTemplateID,
+                collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
                 transcriptionConfiguration: transcriptionConfiguration,
                 summaryConfiguration: summaryConfiguration
             )
         } catch {
             capturePermissionMessage = "Unable to save local state: \(error.localizedDescription)"
+        }
+    }
+
+    private func reconcileSessionControllerPresentationState() {
+        guard let state = sessionControllerState else {
+            dismissedSessionControllerPresentationIdentity = nil
+            collapsedSessionControllerPresentationIdentity = nil
+            return
+        }
+
+        if dismissedSessionControllerPresentationIdentity != state.presentationIdentity {
+            dismissedSessionControllerPresentationIdentity = nil
+        }
+
+        if collapsedSessionControllerPresentationIdentity != state.presentationIdentity {
+            collapsedSessionControllerPresentationIdentity = nil
         }
     }
 

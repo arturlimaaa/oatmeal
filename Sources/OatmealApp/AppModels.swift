@@ -1,6 +1,6 @@
 import Foundation
 
-enum SidebarItem: Hashable {
+enum SidebarItem: Hashable, Codable {
     case upcoming
     case allNotes
     case folder(UUID)

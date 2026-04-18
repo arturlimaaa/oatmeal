@@ -4,18 +4,30 @@ import OatmealCore
 
 struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     var notes: [MeetingNote]
+    var selectedSidebarItem: SidebarItem?
+    var selectedUpcomingEventID: UUID?
+    var selectedNoteID: UUID?
     var selectedTemplateID: UUID?
+    var collapsedSessionControllerPresentationIdentity: String?
     var transcriptionConfiguration: LocalTranscriptionConfiguration
     var summaryConfiguration: LocalSummaryConfiguration
 
     init(
         notes: [MeetingNote] = [],
+        selectedSidebarItem: SidebarItem? = nil,
+        selectedUpcomingEventID: UUID? = nil,
+        selectedNoteID: UUID? = nil,
         selectedTemplateID: UUID? = nil,
+        collapsedSessionControllerPresentationIdentity: String? = nil,
         transcriptionConfiguration: LocalTranscriptionConfiguration = .default,
         summaryConfiguration: LocalSummaryConfiguration = .default
     ) {
         self.notes = notes
+        self.selectedSidebarItem = selectedSidebarItem
+        self.selectedUpcomingEventID = selectedUpcomingEventID
+        self.selectedNoteID = selectedNoteID
         self.selectedTemplateID = selectedTemplateID
+        self.collapsedSessionControllerPresentationIdentity = collapsedSessionControllerPresentationIdentity
         self.transcriptionConfiguration = transcriptionConfiguration
         self.summaryConfiguration = summaryConfiguration
     }
@@ -24,7 +36,11 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case notes
+        case selectedSidebarItem
+        case selectedUpcomingEventID
+        case selectedNoteID
         case selectedTemplateID
+        case collapsedSessionControllerPresentationIdentity
         case transcriptionConfiguration
         case summaryConfiguration
     }
@@ -32,7 +48,14 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         notes = try container.decodeIfPresent([MeetingNote].self, forKey: .notes) ?? []
+        selectedSidebarItem = try container.decodeIfPresent(SidebarItem.self, forKey: .selectedSidebarItem)
+        selectedUpcomingEventID = try container.decodeIfPresent(UUID.self, forKey: .selectedUpcomingEventID)
+        selectedNoteID = try container.decodeIfPresent(UUID.self, forKey: .selectedNoteID)
         selectedTemplateID = try container.decodeIfPresent(UUID.self, forKey: .selectedTemplateID)
+        collapsedSessionControllerPresentationIdentity = try container.decodeIfPresent(
+            String.self,
+            forKey: .collapsedSessionControllerPresentationIdentity
+        )
         transcriptionConfiguration = try container.decodeIfPresent(
             LocalTranscriptionConfiguration.self,
             forKey: .transcriptionConfiguration
@@ -46,7 +69,14 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(notes, forKey: .notes)
+        try container.encodeIfPresent(selectedSidebarItem, forKey: .selectedSidebarItem)
+        try container.encodeIfPresent(selectedUpcomingEventID, forKey: .selectedUpcomingEventID)
+        try container.encodeIfPresent(selectedNoteID, forKey: .selectedNoteID)
         try container.encodeIfPresent(selectedTemplateID, forKey: .selectedTemplateID)
+        try container.encodeIfPresent(
+            collapsedSessionControllerPresentationIdentity,
+            forKey: .collapsedSessionControllerPresentationIdentity
+        )
         try container.encode(transcriptionConfiguration, forKey: .transcriptionConfiguration)
         try container.encode(summaryConfiguration, forKey: .summaryConfiguration)
     }
@@ -113,14 +143,22 @@ final class AppPersistence: @unchecked Sendable {
 
     func save(
         notes: [MeetingNote],
+        selectedSidebarItem: SidebarItem,
+        selectedUpcomingEventID: UUID?,
+        selectedNoteID: UUID?,
         selectedTemplateID: UUID?,
+        collapsedSessionControllerPresentationIdentity: String?,
         transcriptionConfiguration: LocalTranscriptionConfiguration,
         summaryConfiguration: LocalSummaryConfiguration
     ) throws {
         try save(
             AppPersistenceSnapshot(
                 notes: notes,
+                selectedSidebarItem: selectedSidebarItem,
+                selectedUpcomingEventID: selectedUpcomingEventID,
+                selectedNoteID: selectedNoteID,
                 selectedTemplateID: selectedTemplateID,
+                collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
                 transcriptionConfiguration: transcriptionConfiguration,
                 summaryConfiguration: summaryConfiguration
             )

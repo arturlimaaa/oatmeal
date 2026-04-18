@@ -4,6 +4,20 @@ import SwiftUI
 
 struct OatmealRootView: View {
     @Environment(AppViewModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+    @State private var didEvaluateLaunchSessionController = false
+
+    private var coordinator: SessionControllerSceneCoordinator {
+        SessionControllerSceneCoordinator(
+            openWindow: { id in openWindow(id: id) },
+            dismissWindow: { id in dismissWindow(id: id) }
+        )
+    }
+
+    private var router: SessionControllerCommandRouter {
+        SessionControllerCommandRouter(model: model, coordinator: coordinator)
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -17,13 +31,18 @@ struct OatmealRootView: View {
         .task {
             await model.loadSystemState()
             model.selectFirstUpcomingMeetingIfNeeded()
+            guard !didEvaluateLaunchSessionController else {
+                return
+            }
+            didEvaluateLaunchSessionController = true
+            router.presentSessionControllerOnLaunchIfNeeded()
         }
         .onChange(of: model.selectedSidebarItem) { _, newValue in
             switch newValue {
             case .upcoming:
                 model.selectFirstUpcomingMeetingIfNeeded()
             case .templates:
-                model.selectedTemplateID = model.templates.first?.id
+                model.setSelectedTemplateID(model.templates.first?.id)
             default:
                 model.selectFirstAvailableNote()
             }
@@ -39,6 +58,7 @@ struct OatmealRootView: View {
                 Button {
                     Task {
                         await model.toggleCapture()
+                        router.syncSessionControllerWindow()
                     }
                 } label: {
                     Label(captureButtonTitle, systemImage: captureButtonImage)
@@ -280,28 +300,28 @@ struct OatmealRootView: View {
     private var selectedSidebarItemBinding: Binding<SidebarItem?> {
         Binding(
             get: { model.selectedSidebarItem },
-            set: { model.selectedSidebarItem = $0 ?? .allNotes }
+            set: { model.setSelectedSidebarItem($0 ?? .allNotes) }
         )
     }
 
     private var selectedUpcomingEventIDBinding: Binding<CalendarEvent.ID?> {
         Binding(
             get: { model.selectedUpcomingEventID },
-            set: { model.selectedUpcomingEventID = $0 }
+            set: { model.setSelectedUpcomingEventID($0) }
         )
     }
 
     private var selectedNoteIDBinding: Binding<MeetingNote.ID?> {
         Binding(
             get: { model.selectedNoteID },
-            set: { model.selectedNoteID = $0 }
+            set: { model.setSelectedNoteID($0) }
         )
     }
 
     private var selectedTemplateIDBinding: Binding<NoteTemplate.ID?> {
         Binding(
             get: { model.selectedTemplateID },
-            set: { model.selectedTemplateID = $0 }
+            set: { model.setSelectedTemplateID($0) }
         )
     }
 }
