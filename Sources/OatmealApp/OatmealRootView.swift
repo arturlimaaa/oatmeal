@@ -29,6 +29,10 @@ struct OatmealRootView: View {
         }
         .searchable(text: searchTextBinding, placement: .toolbar)
         .task {
+            model.bindLightweightSurfaceWindowActions(
+                openWindow: { id in openWindow(id: id) },
+                dismissWindow: { id in dismissWindow(id: id) }
+            )
             await model.loadSystemState()
             model.selectFirstUpcomingMeetingIfNeeded()
             guard !didEvaluateLaunchSessionController else {
@@ -36,6 +40,7 @@ struct OatmealRootView: View {
             }
             didEvaluateLaunchSessionController = true
             router.presentSessionControllerOnLaunchIfNeeded()
+            router.syncDetectionPromptWindow()
         }
         .onChange(of: model.selectedSidebarItem) { _, newValue in
             switch newValue {
@@ -46,6 +51,9 @@ struct OatmealRootView: View {
             default:
                 model.selectFirstAvailableNote()
             }
+        }
+        .onChange(of: model.detectionPromptState) { _, _ in
+            router.syncDetectionPromptWindow()
         }
         .toolbar {
             ToolbarItemGroup {

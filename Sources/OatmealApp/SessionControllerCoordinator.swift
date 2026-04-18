@@ -21,6 +21,14 @@ struct SessionControllerSceneCoordinator {
         openWindow(OatmealSceneID.sessionController)
     }
 
+    func syncDetectionPromptWindow(with model: AppViewModel) {
+        if model.detectionPromptState != nil {
+            openWindow(OatmealSceneID.meetingDetectionPrompt)
+        } else {
+            dismissWindow(OatmealSceneID.meetingDetectionPrompt)
+        }
+    }
+
     @discardableResult
     func openMainWindow(
         with model: AppViewModel,

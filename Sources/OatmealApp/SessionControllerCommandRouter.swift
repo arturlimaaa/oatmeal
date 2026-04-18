@@ -1,3 +1,4 @@
+import OatmealCore
 import SwiftUI
 
 @MainActor
@@ -21,6 +22,10 @@ struct SessionControllerCommandRouter {
         coordinator.syncSessionControllerWindow(with: model)
     }
 
+    func syncDetectionPromptWindow() {
+        coordinator.syncDetectionPromptWindow(with: model)
+    }
+
     func presentSessionControllerOnLaunchIfNeeded() {
         coordinator.presentSessionControllerOnLaunchIfNeeded(with: model)
     }
@@ -32,6 +37,32 @@ struct SessionControllerCommandRouter {
 
     func stopCapture() async {
         await model.stopSessionControllerCapture()
+        syncSessionControllerWindow()
+    }
+
+    func ignorePendingMeetingDetection() {
+        model.ignorePendingMeetingDetectionPrompt()
+        syncDetectionPromptWindow()
+    }
+
+    func clearPendingMeetingDetection() {
+        model.clearPendingMeetingDetection()
+        syncDetectionPromptWindow()
+    }
+
+    func receiveMeetingDetection(_ detection: PendingMeetingDetection) {
+        model.receiveMeetingDetection(detection)
+        syncDetectionPromptWindow()
+    }
+
+    func selectPendingMeetingCandidate(_ eventID: CalendarEvent.ID) {
+        model.selectPendingMeetingCandidate(eventID)
+        syncDetectionPromptWindow()
+    }
+
+    func startPendingMeetingDetection() async {
+        await model.startPendingMeetingDetectionCapture()
+        syncDetectionPromptWindow()
         syncSessionControllerWindow()
     }
 }

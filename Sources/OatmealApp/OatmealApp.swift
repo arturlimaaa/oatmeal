@@ -27,6 +27,15 @@ public struct OatmealPackageApp: App {
         .windowLevel(.floating)
         .defaultSize(width: 376, height: 248)
 
+        Window("Start Oatmeal", id: OatmealSceneID.meetingDetectionPrompt) {
+            MeetingDetectionPromptWindowRootView()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .windowLevel(.floating)
+        .defaultSize(width: 340, height: 184)
+
         MenuBarExtra {
             OatmealMenuBarContent()
                 .environment(model)

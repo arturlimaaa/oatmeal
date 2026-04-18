@@ -130,6 +130,57 @@ final class SessionControllerSceneCoordinatorTests: XCTestCase {
         XCTAssertEqual(dismissedWindowIDs, [OatmealSceneID.sessionController])
     }
 
+    func testCoordinatorSyncPresentsDetectionPromptWhenPendingDetectedMeetingExists() {
+        let model = makeModel(notes: [])
+        model.receiveMeetingDetection(
+            PendingMeetingDetection(
+                id: UUID(uuidString: "DAD10000-1234-5678-90AB-ACACACACACAC")!,
+                title: "Untitled Meeting",
+                source: .browser("Google Chrome"),
+                detectedAt: date(1_700_040_120),
+                presentation: .prompt
+            )
+        )
+
+        var openedWindowIDs: [String] = []
+        var dismissedWindowIDs: [String] = []
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: { openedWindowIDs.append($0) },
+            dismissWindow: { dismissedWindowIDs.append($0) }
+        )
+
+        coordinator.syncDetectionPromptWindow(with: model)
+
+        XCTAssertEqual(openedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+        XCTAssertTrue(dismissedWindowIDs.isEmpty)
+    }
+
+    func testCoordinatorSyncDismissesDetectionPromptWhenDetectionIsPassiveOnly() {
+        let model = makeModel(notes: [])
+        model.receiveMeetingDetection(
+            PendingMeetingDetection(
+                id: UUID(uuidString: "DAD20000-1234-5678-90AB-ACACACACACAC")!,
+                title: "Untitled Meeting",
+                source: .browser("Google Chrome"),
+                detectedAt: date(1_700_040_130),
+                presentation: .prompt
+            )
+        )
+        model.ignorePendingMeetingDetectionPrompt()
+
+        var openedWindowIDs: [String] = []
+        var dismissedWindowIDs: [String] = []
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: { openedWindowIDs.append($0) },
+            dismissWindow: { dismissedWindowIDs.append($0) }
+        )
+
+        coordinator.syncDetectionPromptWindow(with: model)
+
+        XCTAssertTrue(openedWindowIDs.isEmpty)
+        XCTAssertEqual(dismissedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+    }
+
     func testLaunchPresentationOnlyOpensWhenRecoverableSessionExists() {
         let note = liveNote(
             id: UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!,

@@ -17,6 +17,9 @@ final class AppViewModel {
     private let calendarService: CalendarAccessServing
     private let captureService: CaptureAccessServing
     private let captureEngine: MeetingCaptureEngineServing
+    private let nativeMeetingDetectionService: NativeMeetingDetectionServicing
+    private let browserMeetingDetectionService: BrowserMeetingDetectionServicing
+    private let meetingCandidateResolver: MeetingCandidateResolving
     private let transcriptionService: any LocalTranscriptionServicing
     private let summaryService: any LocalSummaryServicing
     private let summaryModelManager: any LocalSummaryModelManaging
@@ -25,8 +28,14 @@ final class AppViewModel {
     private let liveTranscriptionPollingIntervalNanoseconds: UInt64
     @ObservationIgnored private var processingTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
     @ObservationIgnored private var liveTranscriptionTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var openWindowAction: ((String) -> Void)?
+    @ObservationIgnored private var dismissWindowAction: ((String) -> Void)?
     private let recoveredLiveTranscriptWarning = "Final recording transcription did not complete, so Oatmeal kept the recovered near-live transcript preview. Retry transcription later for a full pass."
+    private let meetingEndedSuggestionMessage = "Oatmeal thinks this meeting may have ended. Stop recording when you are ready, or keep recording if the conversation is still going."
     @ObservationIgnored private var summaryModelManagementTask: Task<Void, Never>?
+    @ObservationIgnored private var hasStartedNativeMeetingDetection = false
+    @ObservationIgnored private var hasStartedBrowserMeetingDetection = false
+    @ObservationIgnored private var activeDetectedMeetingSource: PendingMeetingDetection.Source?
 
     var folders: [NoteFolder] = []
     var notes: [MeetingNote] = []
@@ -38,6 +47,7 @@ final class AppViewModel {
     var isPreparingCapture = false
     var upcomingMeetingsError: String?
     var capturePermissionMessage: String?
+    var meetingDetectionConfiguration = MeetingDetectionConfiguration.default
     var transcriptionConfiguration = LocalTranscriptionConfiguration.default
     var transcriptionRuntimeState: LocalTranscriptionRuntimeState?
     var summaryConfiguration = LocalSummaryConfiguration.default
@@ -50,6 +60,7 @@ final class AppViewModel {
     var selectedUpcomingEventID: CalendarEvent.ID?
     var selectedNoteID: MeetingNote.ID?
     var selectedTemplateID: NoteTemplate.ID?
+    var pendingMeetingDetection: PendingMeetingDetection?
     var searchText = ""
     var dismissedSessionControllerPresentationIdentity: String?
     var collapsedSessionControllerPresentationIdentity: String?
@@ -59,6 +70,9 @@ final class AppViewModel {
         calendarService: CalendarAccessServing = LiveCalendarAccessService(),
         captureService: CaptureAccessServing = LiveCaptureAccessService(),
         captureEngine: MeetingCaptureEngineServing = LiveMeetingCaptureEngine(),
+        nativeMeetingDetectionService: NativeMeetingDetectionServicing = LiveNativeMeetingDetectionService(),
+        browserMeetingDetectionService: BrowserMeetingDetectionServicing = LiveBrowserMeetingDetectionService(),
+        meetingCandidateResolver: MeetingCandidateResolving = LiveMeetingCandidateResolver(),
         transcriptionService: (any LocalTranscriptionServicing)? = nil,
         summaryService: (any LocalSummaryServicing)? = nil,
         summaryModelManager: (any LocalSummaryModelManaging)? = nil,
@@ -70,6 +84,9 @@ final class AppViewModel {
         self.calendarService = calendarService
         self.captureService = captureService
         self.captureEngine = captureEngine
+        self.nativeMeetingDetectionService = nativeMeetingDetectionService
+        self.browserMeetingDetectionService = browserMeetingDetectionService
+        self.meetingCandidateResolver = meetingCandidateResolver
         self.persistence = persistence
         self.nowProvider = nowProvider
         self.liveTranscriptionPollingIntervalNanoseconds = UInt64(
@@ -155,8 +172,18 @@ final class AppViewModel {
         )
     }
 
+    var detectionPromptState: MeetingDetectionPromptState? {
+        MeetingDetectionPromptAdapter.promptState(for: pendingMeetingDetection)
+    }
+
+    var menuBarMeetingDetectionState: MeetingDetectionPromptState? {
+        MeetingDetectionPromptAdapter.menuBarState(for: pendingMeetingDetection)
+    }
+
     var menuBarSymbolName: String {
-        menuBarSessionState?.menuBarSymbolName ?? "circle.fill"
+        menuBarSessionState?.menuBarSymbolName
+            ?? menuBarMeetingDetectionState?.symbolName
+            ?? "circle.fill"
     }
 
     var shouldAutoPresentSessionControllerOnLaunch: Bool {
@@ -260,6 +287,142 @@ final class AppViewModel {
     func startQuickNoteCapture() async {
         startQuickNote()
         await toggleCapture()
+    }
+
+    func bindLightweightSurfaceWindowActions(
+        openWindow: @escaping (String) -> Void,
+        dismissWindow: @escaping (String) -> Void
+    ) {
+        openWindowAction = openWindow
+        dismissWindowAction = dismissWindow
+    }
+
+    func receiveMeetingDetection(_ detection: PendingMeetingDetection) {
+        if detection.phase == .endSuggestion {
+            receiveMeetingEndSuggestion(detection)
+            return
+        }
+
+        let resolvedDetection = meetingCandidateResolver.resolve(
+            detection: detection,
+            availableEvents: upcomingMeetings
+        )
+
+        guard !notes.contains(where: { $0.captureState.isActive }) else {
+            return
+        }
+
+        guard meetingDetectionConfiguration.isEnabled(for: resolvedDetection.source) else {
+            if pendingMeetingDetection?.source == resolvedDetection.source {
+                clearPendingMeetingDetection()
+            }
+            return
+        }
+
+        if let pendingMeetingDetection,
+           pendingMeetingDetection.source == resolvedDetection.source,
+           pendingMeetingDetection.effectiveTitle.caseInsensitiveCompare(resolvedDetection.effectiveTitle) == .orderedSame,
+           pendingMeetingDetection.calendarContextSignature == resolvedDetection.calendarContextSignature {
+            if pendingMeetingDetection.promptWasDismissed {
+                return
+            }
+
+            if pendingMeetingDetection.presentation == .passiveSuggestion,
+               resolvedDetection.presentation == .prompt {
+                self.pendingMeetingDetection = resolvedDetection
+                syncDetectionPromptWindowFromModel()
+                persistState()
+            }
+            return
+        }
+
+        pendingMeetingDetection = resolvedDetection
+        if shouldAutomaticallyStartCapture(for: resolvedDetection) {
+            Task { [weak self] in
+                await self?.startPendingMeetingDetectionCapture()
+            }
+            return
+        }
+        syncDetectionPromptWindowFromModel()
+        persistState()
+    }
+
+    func ignorePendingMeetingDetectionPrompt() {
+        guard var pendingMeetingDetection else {
+            return
+        }
+
+        if pendingMeetingDetection.phase == .endSuggestion {
+            pendingMeetingDetection.presentation = .passiveSuggestion
+            pendingMeetingDetection.promptWasDismissed = true
+            self.pendingMeetingDetection = pendingMeetingDetection
+            syncDetectionPromptWindowFromModel()
+            persistState()
+            return
+        }
+
+        pendingMeetingDetection.presentation = .passiveSuggestion
+        pendingMeetingDetection.promptWasDismissed = true
+        self.pendingMeetingDetection = pendingMeetingDetection
+        syncDetectionPromptWindowFromModel()
+        persistState()
+    }
+
+    func clearPendingMeetingDetection() {
+        pendingMeetingDetection = nil
+        syncDetectionPromptWindowFromModel()
+        persistState()
+    }
+
+    func selectPendingMeetingCandidate(_ eventID: CalendarEvent.ID) {
+        guard var pendingMeetingDetection,
+              let event = pendingMeetingDetection.candidateCalendarEvents.first(where: { $0.id == eventID }) else {
+            return
+        }
+
+        pendingMeetingDetection.calendarEvent = event
+        pendingMeetingDetection.presentation = .prompt
+        self.pendingMeetingDetection = pendingMeetingDetection
+        syncDetectionPromptWindowFromModel()
+    }
+
+    func startPendingMeetingDetectionCapture() async {
+        guard var detection = pendingMeetingDetection else {
+            return
+        }
+
+        if detection.phase == .endSuggestion {
+            pendingMeetingDetection = nil
+            syncDetectionPromptWindowFromModel()
+            persistState()
+            await stopSessionControllerCapture()
+            return
+        }
+
+        if detection.requiresCalendarChoice {
+            detection.presentation = .prompt
+            pendingMeetingDetection = detection
+            syncDetectionPromptWindowFromModel()
+            persistState()
+            return
+        }
+
+        pendingMeetingDetection = nil
+        syncDetectionPromptWindowFromModel()
+        persistState()
+
+        if let event = detection.calendarEvent {
+            startNote(for: event)
+        } else {
+            startDetectedMeeting(title: detection.effectiveTitle)
+        }
+
+        await toggleCapture()
+        if selectedNote?.captureState.isActive == true {
+            activeDetectedMeetingSource = detection.source
+        } else {
+            activeDetectedMeetingSource = nil
+        }
     }
 
     func stopSessionControllerCapture() async {
@@ -369,8 +532,17 @@ final class AppViewModel {
         await refreshTranscriptionRuntimeState()
         await refreshSummaryRuntimeState()
         await refreshSummaryModelCatalogState()
+        startNativeMeetingDetectionIfNeeded()
+        startBrowserMeetingDetectionIfNeeded()
+        suggestEndedMeetingsIfNeeded()
         recoverLiveSessionsIfNeeded()
         resumePostCaptureProcessingIfNeeded()
+        if let pendingMeetingDetection,
+           meetingDetectionConfiguration.isEnabled(for: pendingMeetingDetection.source) {
+            syncDetectionPromptWindowFromModel()
+        } else if pendingMeetingDetection != nil {
+            clearPendingMeetingDetection()
+        }
     }
 
     func loadCalendarState() async {
@@ -453,6 +625,25 @@ final class AppViewModel {
         persistState()
     }
 
+    func startDetectedMeeting(title: String) {
+        let now = nowProvider()
+        let note = MeetingNote(
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? "Untitled Meeting",
+            origin: .quickNote(createdAt: now),
+            templateID: selectedTemplate?.id ?? store.defaultTemplate.id,
+            captureState: .ready,
+            rawNotes: "### Context\n- ",
+            createdAt: now,
+            updatedAt: now
+        )
+
+        store.save(note)
+        refresh()
+        selectedSidebarItem = .allNotes
+        selectedNoteID = note.id
+        persistState()
+    }
+
     func startNote(for event: CalendarEvent) {
         if let existingNote = note(for: event) {
             selectedSidebarItem = .allNotes
@@ -517,6 +708,7 @@ final class AppViewModel {
             do {
                 let mode: CaptureMode = requiresSystemAudio(for: note) ? .systemAudioAndMicrophone : .microphoneOnly
                 let session = try await captureEngine.startCapture(for: note.id, mode: mode)
+                pendingMeetingDetection = nil
                 note.captureState.beginCapture(at: session.startedAt)
                 note.beginLiveSession(
                     at: session.startedAt,
@@ -527,6 +719,10 @@ final class AppViewModel {
             } catch {
                 let message = error.localizedDescription
                 capturePermissionMessage = message
+                activeDetectedMeetingSource = nil
+                if pendingMeetingDetection?.phase == .endSuggestion {
+                    pendingMeetingDetection = nil
+                }
                 note.captureState.fail(reason: message, at: now, recoverable: true)
                 note.failLiveSession(message: message, at: now)
                 store.save(note)
@@ -550,6 +746,10 @@ final class AppViewModel {
             } catch {
                 let message = error.localizedDescription
                 capturePermissionMessage = message
+                activeDetectedMeetingSource = nil
+                if pendingMeetingDetection?.phase == .endSuggestion {
+                    pendingMeetingDetection = nil
+                }
                 note.captureState.fail(reason: message, at: now, recoverable: true)
                 note.failLiveSession(message: message, at: now)
                 store.save(note)
@@ -560,6 +760,10 @@ final class AppViewModel {
             }
 
             note.captureState.complete(at: artifact.endedAt)
+            activeDetectedMeetingSource = nil
+            if pendingMeetingDetection?.phase == .endSuggestion {
+                pendingMeetingDetection = nil
+            }
             let liveCompletionMessage: String?
             if note.liveSessionState.status == .delayed || note.liveSessionState.hasPreviewEntries {
                 liveCompletionMessage = "Recording stopped. Oatmeal is reconciling the near-live transcript with the saved recording in the background."
@@ -639,6 +843,31 @@ final class AppViewModel {
         Task {
             await refreshSummaryRuntimeState()
         }
+    }
+
+    func setMeetingDetectionSourceEnabled(_ source: MeetingDetectionSourceSetting, enabled: Bool) {
+        switch source {
+        case .zoom:
+            meetingDetectionConfiguration.zoomEnabled = enabled
+        case .teams:
+            meetingDetectionConfiguration.teamsEnabled = enabled
+        case .slack:
+            meetingDetectionConfiguration.slackEnabled = enabled
+        case .browsers:
+            meetingDetectionConfiguration.browsersEnabled = enabled
+        }
+
+        if let pendingMeetingDetection,
+           !meetingDetectionConfiguration.isEnabled(for: pendingMeetingDetection.source) {
+            clearPendingMeetingDetection()
+        }
+
+        persistState()
+    }
+
+    func setHighConfidenceAutoStartEnabled(_ enabled: Bool) {
+        meetingDetectionConfiguration.highConfidenceAutoStartEnabled = enabled
+        persistState()
     }
 
     func setLiveTranscriptPanelPresented(_ presented: Bool, for noteID: MeetingNote.ID) {
@@ -833,6 +1062,8 @@ final class AppViewModel {
             || snapshot.selectedNoteID != nil
             || snapshot.selectedTemplateID != nil
             || snapshot.collapsedSessionControllerPresentationIdentity != nil
+            || snapshot.pendingMeetingDetection != nil
+            || snapshot.meetingDetectionConfiguration != .default
             || snapshot.transcriptionConfiguration != .default
             || snapshot.summaryConfiguration != .default else {
             return
@@ -851,6 +1082,8 @@ final class AppViewModel {
         selectedNoteID = snapshot.selectedNoteID
         selectedTemplateID = snapshot.selectedTemplateID
         collapsedSessionControllerPresentationIdentity = snapshot.collapsedSessionControllerPresentationIdentity
+        pendingMeetingDetection = snapshot.pendingMeetingDetection
+        meetingDetectionConfiguration = snapshot.meetingDetectionConfiguration
         transcriptionConfiguration = snapshot.transcriptionConfiguration
         summaryConfiguration = snapshot.summaryConfiguration
     }
@@ -864,12 +1097,80 @@ final class AppViewModel {
                 selectedNoteID: selectedNoteID,
                 selectedTemplateID: selectedTemplateID,
                 collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
+                pendingMeetingDetection: pendingMeetingDetection,
+                meetingDetectionConfiguration: meetingDetectionConfiguration,
                 transcriptionConfiguration: transcriptionConfiguration,
                 summaryConfiguration: summaryConfiguration
             )
         } catch {
             capturePermissionMessage = "Unable to save local state: \(error.localizedDescription)"
         }
+    }
+
+    private func startNativeMeetingDetectionIfNeeded() {
+        guard !hasStartedNativeMeetingDetection else {
+            return
+        }
+
+        hasStartedNativeMeetingDetection = true
+        nativeMeetingDetectionService.start { [weak self] detection in
+            self?.receiveMeetingDetection(detection)
+        }
+    }
+
+    private func startBrowserMeetingDetectionIfNeeded() {
+        guard !hasStartedBrowserMeetingDetection else {
+            return
+        }
+
+        hasStartedBrowserMeetingDetection = true
+        browserMeetingDetectionService.start { [weak self] detection in
+            self?.receiveMeetingDetection(detection)
+        }
+    }
+
+    private func syncDetectionPromptWindowFromModel() {
+        guard let openWindowAction, let dismissWindowAction else {
+            return
+        }
+
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: openWindowAction,
+            dismissWindow: dismissWindowAction
+        )
+        coordinator.syncDetectionPromptWindow(with: self)
+    }
+
+    private func shouldAutomaticallyStartCapture(for detection: PendingMeetingDetection) -> Bool {
+        guard detection.phase == .start else {
+            return false
+        }
+
+        guard meetingDetectionConfiguration.highConfidenceAutoStartEnabled else {
+            return false
+        }
+
+        guard detection.confidence == .high else {
+            return false
+        }
+
+        guard !detection.requiresCalendarChoice else {
+            return false
+        }
+
+        let requiredPermissions: CapturePermissions
+        if detection.calendarEvent != nil {
+            requiredPermissions = CapturePermissions(
+                microphone: capturePermissions.microphone,
+                systemAudio: capturePermissions.systemAudio,
+                notifications: capturePermissions.notifications,
+                calendar: capturePermissions.calendar
+            )
+            return requiredPermissions.microphone == .granted
+                && requiredPermissions.systemAudio == .granted
+        }
+
+        return capturePermissions.microphone == .granted
     }
 
     private func reconcileSessionControllerPresentationState() {
@@ -886,6 +1187,97 @@ final class AppViewModel {
         if collapsedSessionControllerPresentationIdentity != state.presentationIdentity {
             collapsedSessionControllerPresentationIdentity = nil
         }
+    }
+
+    private func receiveMeetingEndSuggestion(_ detection: PendingMeetingDetection) {
+        guard let activeDetectedMeetingSource,
+              activeDetectedMeetingSource == detection.source,
+              let activeNote = notes.first(where: { $0.captureState.isActive }) else {
+            return
+        }
+
+        if let pendingMeetingDetection,
+           pendingMeetingDetection.phase == .endSuggestion,
+           pendingMeetingDetection.source == detection.source {
+            if pendingMeetingDetection.promptWasDismissed {
+                return
+            }
+
+            if pendingMeetingDetection.presentation == .passiveSuggestion,
+               detection.presentation == .prompt {
+                self.pendingMeetingDetection = detection
+                syncDetectionPromptWindowFromModel()
+                persistState()
+            }
+            return
+        }
+
+        var suggestion = detection
+        if activeNote.calendarEvent != nil {
+            suggestion.calendarEvent = activeNote.calendarEvent
+        }
+        if suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || suggestion.title == "Untitled Meeting" {
+            suggestion.title = activeNote.title
+        }
+
+        surfaceMeetingEndSuggestion(for: activeNote.id, message: meetingEndedSuggestionMessage)
+        pendingMeetingDetection = suggestion
+        syncDetectionPromptWindowFromModel()
+        persistState()
+    }
+
+    private func suggestEndedMeetingsIfNeeded() {
+        let now = nowProvider()
+
+        for note in notes where note.captureState.isActive {
+            guard let calendarEvent = note.calendarEvent,
+                  calendarEvent.endDate <= now else {
+                continue
+            }
+
+            surfaceMeetingEndSuggestion(for: note.id, message: meetingEndedSuggestionMessage)
+            if pendingMeetingDetection == nil {
+                pendingMeetingDetection = PendingMeetingDetection(
+                    title: note.title,
+                    source: .unknown,
+                    phase: .endSuggestion,
+                    detectedAt: now,
+                    presentation: .prompt,
+                    confidence: .low,
+                    calendarEvent: calendarEvent
+                )
+            }
+        }
+    }
+
+    private func surfaceMeetingEndSuggestion(for noteID: MeetingNote.ID, message: String) {
+        guard var note = store.note(id: noteID), note.captureState.isActive else {
+            return
+        }
+
+        let updatedAt = nowProvider()
+        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alreadySurfaced = note.liveSessionState.statusMessage == normalizedMessage
+            || note.liveSessionState.previewEntries.contains(where: { entry in
+                entry.kind == .system
+                    && entry.text.trimmingCharacters(in: .whitespacesAndNewlines) == normalizedMessage
+            })
+        guard !alreadySurfaced else {
+            return
+        }
+
+        note.liveSessionState.statusMessage = normalizedMessage
+        note.liveSessionState.lastUpdatedAt = updatedAt
+        note.appendLiveTranscriptEntry(
+            LiveTranscriptEntry(
+                createdAt: updatedAt,
+                kind: .system,
+                text: normalizedMessage
+            ),
+            updatedAt: updatedAt
+        )
+        persist(note)
     }
 
     private func enqueuePostCaptureProcessing(_ request: PostCaptureProcessingRequest) {

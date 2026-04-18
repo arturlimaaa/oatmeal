@@ -340,6 +340,105 @@ final class SessionControllerCommandTests: XCTestCase {
         XCTAssertTrue(model.selectedNote?.liveSessionState.isTranscriptPanelPresented == true)
     }
 
+    func testDetectedMeetingSurfacesAsPendingPromptWithoutOpeningRecorderShell() {
+        let model = makeModel(notes: [], captureEngine: CommandStubCaptureEngine())
+        let detectedMeeting = detectedMeetingContext(
+            id: UUID(uuidString: "11110000-AAAA-BBBB-CCCC-DDDDDDDDDDDD")!,
+            detectedAt: date(1_700_051_200)
+        )
+
+        var openedWindowIDs: [String] = []
+        var dismissedWindowIDs: [String] = []
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: { openedWindowIDs.append($0) },
+            dismissWindow: { dismissedWindowIDs.append($0) }
+        )
+        let router = SessionControllerCommandRouter(model: model, coordinator: coordinator)
+
+        router.receiveMeetingDetection(detectedMeeting)
+
+        guard let prompt = model.detectionPromptState else {
+            XCTFail("Expected a pending detected meeting prompt.")
+            return
+        }
+        XCTAssertEqual(prompt.title, "Untitled Meeting")
+        XCTAssertEqual(prompt.sourceName, "Google Chrome")
+        XCTAssertEqual(prompt.headline, "Meeting detected")
+        XCTAssertEqual(prompt.primaryActionTitle, "Start Oatmeal")
+        XCTAssertEqual(model.menuBarMeetingDetectionState?.kind, .prompt)
+        XCTAssertNil(model.sessionControllerState)
+        XCTAssertNil(model.selectedNoteID)
+        XCTAssertEqual(model.selectedSidebarItem, .upcoming)
+        XCTAssertEqual(openedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+        XCTAssertTrue(dismissedWindowIDs.isEmpty)
+    }
+
+    func testIgnoringDetectedMeetingPromptDowngradesToPassiveMenuBarSuggestion() {
+        let model = makeModel(notes: [], captureEngine: CommandStubCaptureEngine())
+        let detectedMeeting = detectedMeetingContext(
+            id: UUID(uuidString: "22220000-AAAA-BBBB-CCCC-DDDDDDDDDDDD")!,
+            detectedAt: date(1_700_051_300)
+        )
+
+        var openedWindowIDs: [String] = []
+        var dismissedWindowIDs: [String] = []
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: { openedWindowIDs.append($0) },
+            dismissWindow: { dismissedWindowIDs.append($0) }
+        )
+        let router = SessionControllerCommandRouter(model: model, coordinator: coordinator)
+
+        router.receiveMeetingDetection(detectedMeeting)
+        router.ignorePendingMeetingDetection()
+
+        XCTAssertNil(model.detectionPromptState)
+        guard let suggestion = model.menuBarMeetingDetectionState else {
+            XCTFail("Expected a passive detected meeting suggestion after ignoring the prompt.")
+            return
+        }
+        XCTAssertEqual(suggestion.title, "Untitled Meeting")
+        XCTAssertEqual(suggestion.sourceName, "Google Chrome")
+        XCTAssertEqual(suggestion.kind, .passiveSuggestion)
+        XCTAssertEqual(suggestion.primaryActionTitle, "Start Oatmeal")
+        XCTAssertNil(model.sessionControllerState)
+        XCTAssertEqual(openedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+        XCTAssertEqual(dismissedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+    }
+
+    func testStartingDetectedMeetingCaptureClearsPromptAndHandsOffToSessionController() async {
+        let captureEngine = CommandStubCaptureEngine()
+        let model = makeModel(notes: [], captureEngine: captureEngine)
+        let detectedMeeting = detectedMeetingContext(
+            id: UUID(uuidString: "33330000-AAAA-BBBB-CCCC-DDDDDDDDDDDD")!,
+            detectedAt: date(1_700_051_400)
+        )
+
+        var openedWindowIDs: [String] = []
+        var dismissedWindowIDs: [String] = []
+        let coordinator = SessionControllerSceneCoordinator(
+            openWindow: { openedWindowIDs.append($0) },
+            dismissWindow: { dismissedWindowIDs.append($0) }
+        )
+        let router = SessionControllerCommandRouter(model: model, coordinator: coordinator)
+
+        router.receiveMeetingDetection(detectedMeeting)
+
+        await router.startPendingMeetingDetection()
+
+        XCTAssertEqual(captureEngine.startCalls, 1)
+        XCTAssertNil(model.pendingMeetingDetection)
+        XCTAssertNil(model.detectionPromptState)
+        XCTAssertNil(model.menuBarMeetingDetectionState)
+        XCTAssertEqual(model.selectedNote?.title, "Untitled Meeting")
+        XCTAssertEqual(model.selectedNote?.captureState.phase, .capturing)
+        XCTAssertEqual(model.sessionControllerState?.kind, .active)
+        XCTAssertEqual(
+            openedWindowIDs,
+            [OatmealSceneID.meetingDetectionPrompt, OatmealSceneID.sessionController]
+        )
+        XCTAssertEqual(dismissedWindowIDs, [OatmealSceneID.meetingDetectionPrompt])
+    }
+
     func testSharedCommandRouterOpensRecoveredTranscriptInMainWindow() {
         let recoveredNoteID = UUID(uuidString: "ABAB0000-1111-2222-3333-444444444444")!
         let idleNoteID = UUID(uuidString: "CDCD0000-1111-2222-3333-444444444444")!
@@ -619,6 +718,19 @@ final class SessionControllerCommandTests: XCTestCase {
 
     private func recordingURL(named name: String) -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: false)
+    }
+
+    private func detectedMeetingContext(
+        id: UUID,
+        detectedAt: Date
+    ) -> PendingMeetingDetection {
+        PendingMeetingDetection(
+            id: id,
+            title: "Untitled Meeting",
+            source: .browser("Google Chrome"),
+            detectedAt: detectedAt,
+            presentation: .prompt
+        )
     }
 }
 

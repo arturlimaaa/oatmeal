@@ -19,6 +19,58 @@ struct OatmealSettingsView: View {
                 }
             }
 
+            Section("Auto-detection") {
+                Toggle(
+                    "Detect Zoom meetings",
+                    isOn: Binding(
+                        get: { model.meetingDetectionConfiguration.zoomEnabled },
+                        set: { model.setMeetingDetectionSourceEnabled(.zoom, enabled: $0) }
+                    )
+                )
+
+                Toggle(
+                    "Detect Teams meetings",
+                    isOn: Binding(
+                        get: { model.meetingDetectionConfiguration.teamsEnabled },
+                        set: { model.setMeetingDetectionSourceEnabled(.teams, enabled: $0) }
+                    )
+                )
+
+                Toggle(
+                    "Detect Slack calls",
+                    isOn: Binding(
+                        get: { model.meetingDetectionConfiguration.slackEnabled },
+                        set: { model.setMeetingDetectionSourceEnabled(.slack, enabled: $0) }
+                    )
+                )
+
+                Toggle(
+                    "Detect browser calls",
+                    isOn: Binding(
+                        get: { model.meetingDetectionConfiguration.browsersEnabled },
+                        set: { model.setMeetingDetectionSourceEnabled(.browsers, enabled: $0) }
+                    )
+                )
+
+                Toggle(
+                    "Auto-start for high-confidence detections",
+                    isOn: Binding(
+                        get: { model.meetingDetectionConfiguration.highConfidenceAutoStartEnabled },
+                        set: { model.setHighConfidenceAutoStartEnabled($0) }
+                    )
+                )
+
+                if !launchAtLogin {
+                    Text("Auto-detection works best when Oatmeal launches at login, so it is already running when you join a call.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Low-confidence detections still use the existing Start Oatmeal prompt or passive menu-bar suggestion.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Transcription") {
                 Picker(
                     "Backend",

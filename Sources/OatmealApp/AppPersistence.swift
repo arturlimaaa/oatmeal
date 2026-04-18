@@ -9,6 +9,8 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     var selectedNoteID: UUID?
     var selectedTemplateID: UUID?
     var collapsedSessionControllerPresentationIdentity: String?
+    var pendingMeetingDetection: PendingMeetingDetection?
+    var meetingDetectionConfiguration: MeetingDetectionConfiguration
     var transcriptionConfiguration: LocalTranscriptionConfiguration
     var summaryConfiguration: LocalSummaryConfiguration
 
@@ -19,6 +21,8 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         selectedNoteID: UUID? = nil,
         selectedTemplateID: UUID? = nil,
         collapsedSessionControllerPresentationIdentity: String? = nil,
+        pendingMeetingDetection: PendingMeetingDetection? = nil,
+        meetingDetectionConfiguration: MeetingDetectionConfiguration = .default,
         transcriptionConfiguration: LocalTranscriptionConfiguration = .default,
         summaryConfiguration: LocalSummaryConfiguration = .default
     ) {
@@ -28,6 +32,8 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         self.selectedNoteID = selectedNoteID
         self.selectedTemplateID = selectedTemplateID
         self.collapsedSessionControllerPresentationIdentity = collapsedSessionControllerPresentationIdentity
+        self.pendingMeetingDetection = pendingMeetingDetection
+        self.meetingDetectionConfiguration = meetingDetectionConfiguration
         self.transcriptionConfiguration = transcriptionConfiguration
         self.summaryConfiguration = summaryConfiguration
     }
@@ -41,6 +47,8 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         case selectedNoteID
         case selectedTemplateID
         case collapsedSessionControllerPresentationIdentity
+        case pendingMeetingDetection
+        case meetingDetectionConfiguration
         case transcriptionConfiguration
         case summaryConfiguration
     }
@@ -56,6 +64,14 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
             String.self,
             forKey: .collapsedSessionControllerPresentationIdentity
         )
+        pendingMeetingDetection = try container.decodeIfPresent(
+            PendingMeetingDetection.self,
+            forKey: .pendingMeetingDetection
+        )
+        meetingDetectionConfiguration = try container.decodeIfPresent(
+            MeetingDetectionConfiguration.self,
+            forKey: .meetingDetectionConfiguration
+        ) ?? .default
         transcriptionConfiguration = try container.decodeIfPresent(
             LocalTranscriptionConfiguration.self,
             forKey: .transcriptionConfiguration
@@ -77,6 +93,8 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
             collapsedSessionControllerPresentationIdentity,
             forKey: .collapsedSessionControllerPresentationIdentity
         )
+        try container.encodeIfPresent(pendingMeetingDetection, forKey: .pendingMeetingDetection)
+        try container.encode(meetingDetectionConfiguration, forKey: .meetingDetectionConfiguration)
         try container.encode(transcriptionConfiguration, forKey: .transcriptionConfiguration)
         try container.encode(summaryConfiguration, forKey: .summaryConfiguration)
     }
@@ -148,6 +166,8 @@ final class AppPersistence: @unchecked Sendable {
         selectedNoteID: UUID?,
         selectedTemplateID: UUID?,
         collapsedSessionControllerPresentationIdentity: String?,
+        pendingMeetingDetection: PendingMeetingDetection?,
+        meetingDetectionConfiguration: MeetingDetectionConfiguration,
         transcriptionConfiguration: LocalTranscriptionConfiguration,
         summaryConfiguration: LocalSummaryConfiguration
     ) throws {
@@ -159,6 +179,8 @@ final class AppPersistence: @unchecked Sendable {
                 selectedNoteID: selectedNoteID,
                 selectedTemplateID: selectedTemplateID,
                 collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
+                pendingMeetingDetection: pendingMeetingDetection,
+                meetingDetectionConfiguration: meetingDetectionConfiguration,
                 transcriptionConfiguration: transcriptionConfiguration,
                 summaryConfiguration: summaryConfiguration
             )
