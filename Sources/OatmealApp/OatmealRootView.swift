@@ -841,6 +841,27 @@ private struct MeetingDetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Structured Workflows")
+                        .font(.headline)
+
+                    HStack(spacing: 10) {
+                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow), id: \.self) { kind in
+                            Button {
+                                submitAssistantDraftAction(kind)
+                            } label: {
+                                Label(kind.displayLabel, systemImage: kind.actionSystemImage)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(note.hasPendingAssistantTurn)
+                        }
+                    }
+
+                    Text("These actions stay scoped to this meeting and turn the note into a grounded readout of decisions, risks, and follow-up work.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if note.assistantThread.turns.isEmpty {
                     Text("No assistant prompts yet. Ask what changed, what was decided, or generate a draft, and Oatmeal will work from this note only.")
                         .foregroundStyle(.secondary)
@@ -2750,6 +2771,10 @@ private extension NoteAssistantTurnKind {
             "envelope"
         case .slackRecap:
             "bubble.left.and.bubble.right"
+        case .actionItems:
+            "list.bullet"
+        case .decisionsAndRisks:
+            "checkmark.circle"
         }
     }
 
@@ -2761,6 +2786,10 @@ private extension NoteAssistantTurnKind {
             "Drafting a grounded follow-up email for this meeting."
         case .slackRecap:
             "Drafting a grounded Slack recap for this meeting."
+        case .actionItems:
+            "Extracting grounded action items and likely owners for this meeting."
+        case .decisionsAndRisks:
+            "Extracting grounded decisions, tentative discussion, and open questions for this meeting."
         }
     }
 
@@ -2770,6 +2799,8 @@ private extension NoteAssistantTurnKind {
             "Copy Response"
         case .followUpEmail, .slackRecap:
             "Copy Draft"
+        case .actionItems, .decisionsAndRisks:
+            "Copy Readout"
         }
     }
 }

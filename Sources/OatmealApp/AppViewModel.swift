@@ -2266,6 +2266,10 @@ private extension NoteAssistantTurnKind {
             return "Draft a follow-up email"
         case .slackRecap:
             return "Draft a Slack recap"
+        case .actionItems:
+            return "Extract action items"
+        case .decisionsAndRisks:
+            return "Extract decisions and risks"
         }
     }
 }

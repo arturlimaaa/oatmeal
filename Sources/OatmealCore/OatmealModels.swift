@@ -225,6 +225,8 @@ public enum NoteAssistantTurnKind: String, Codable, Equatable, Sendable, CaseIte
     case prompt
     case followUpEmail
     case slackRecap
+    case actionItems
+    case decisionsAndRisks
 
     public var displayLabel: String {
         switch self {
@@ -234,11 +236,29 @@ public enum NoteAssistantTurnKind: String, Codable, Equatable, Sendable, CaseIte
             "Follow-up Email"
         case .slackRecap:
             "Slack Recap"
+        case .actionItems:
+            "Action Items"
+        case .decisionsAndRisks:
+            "Decisions & Risks"
         }
     }
 
     public var isDraftingAction: Bool {
-        self != .prompt
+        switch self {
+        case .followUpEmail, .slackRecap:
+            return true
+        case .prompt, .actionItems, .decisionsAndRisks:
+            return false
+        }
+    }
+
+    public var isStructuredWorkflow: Bool {
+        switch self {
+        case .actionItems, .decisionsAndRisks:
+            return true
+        case .prompt, .followUpEmail, .slackRecap:
+            return false
+        }
     }
 }
 

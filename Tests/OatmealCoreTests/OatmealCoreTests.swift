@@ -271,6 +271,26 @@ final class OatmealCoreTests: XCTestCase {
         XCTAssertEqual(note.assistantThread.turns[0].status, .pending)
     }
 
+    func testSubmittingStructuredAssistantWorkflowPersistsTurnKind() {
+        let requestedAt = date(1_700_020_590)
+        var note = MeetingNote(
+            title: "Structured workflow note",
+            origin: .quickNote(createdAt: requestedAt),
+            rawNotes: "Need to confirm ownership and unresolved launch questions."
+        )
+
+        _ = note.submitAssistantPrompt(
+            "Extract decisions and risks",
+            kind: .decisionsAndRisks,
+            at: requestedAt
+        )
+
+        XCTAssertEqual(note.assistantThread.turns.count, 1)
+        XCTAssertEqual(note.assistantThread.turns[0].kind, .decisionsAndRisks)
+        XCTAssertEqual(note.assistantThread.turns[0].prompt, "Extract decisions and risks")
+        XCTAssertEqual(note.assistantThread.turns[0].status, .pending)
+    }
+
     func testLegacyAssistantTurnDecodesWithoutCitations() throws {
         let json = """
         {

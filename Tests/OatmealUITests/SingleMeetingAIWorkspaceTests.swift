@@ -332,6 +332,120 @@ final class SingleMeetingAIWorkspaceTests: XCTestCase {
         XCTAssertEqual(restoredNote.assistantThread.turns[0].status, .completed)
     }
 
+    func testActionItemsWorkflowExtractsConfirmedLikelyAndUnclearOwners() async throws {
+        let alexSegmentID = UUID(uuidString: "C8000000-0000-0000-0000-000000000008")!
+        let noteID = UUID(uuidString: "C8000000-0000-0000-0000-000000000018")!
+        let note = MeetingNote(
+            id: noteID,
+            title: "Weekly Launch Sync",
+            origin: .quickNote(createdAt: date(1_700_207_000)),
+            calendarEvent: CalendarEvent(
+                id: UUID(uuidString: "C8000000-0000-0000-0000-000000000028")!,
+                title: "Weekly Launch Sync",
+                startDate: date(1_700_207_000),
+                endDate: date(1_700_207_900),
+                attendees: [
+                    MeetingParticipant(name: "Alex"),
+                    MeetingParticipant(name: "Sam")
+                ],
+                source: .googleCalendar
+            ),
+            rawNotes: "Review the support macro updates before Thursday.",
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: alexSegmentID,
+                    speakerName: "Alex",
+                    text: "I'll send the updated rollout plan by Friday."
+                )
+            ],
+            enhancedNote: EnhancedNote(
+                summary: "Aligned on the launch prep work.",
+                actionItems: [
+                    ActionItem(text: "Confirm the QA checklist on Monday.", assignee: "Sam")
+                ]
+            )
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_207_100) }
+        )
+
+        model.submitAssistantDraftAction(.actionItems, for: noteID)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+
+        XCTAssertTrue(completed)
+        let turn = try XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        XCTAssertEqual(turn.kind, .actionItems)
+        XCTAssertEqual(turn.prompt, "Extract action items")
+        XCTAssertTrue(turn.response?.contains("Action items from this meeting:") == true)
+        XCTAssertTrue(turn.response?.contains("Sam — Confirm the QA checklist on Monday.") == true)
+        XCTAssertTrue(turn.response?.contains("Likely owner: Alex — send the updated rollout plan by Friday.") == true)
+        XCTAssertTrue(turn.response?.contains("Ownership unclear — Review the support macro updates before Thursday.") == true)
+        XCTAssertTrue(turn.citations.contains(where: { $0.transcriptSegmentID == alexSegmentID }))
+        XCTAssertTrue(turn.citations.contains(where: { $0.kind == .enhancedActionItem }))
+    }
+
+    func testDecisionsAndRisksWorkflowSeparatesConfirmedTentativeAndOpenQuestions() async throws {
+        let noteID = UUID(uuidString: "C9000000-0000-0000-0000-000000000009")!
+        let note = MeetingNote(
+            id: noteID,
+            title: "Pricing Review",
+            origin: .quickNote(createdAt: date(1_700_208_000)),
+            rawNotes: "Maybe expand analytics in phase two if the launch is stable.",
+            transcriptSegments: [
+                TranscriptSegment(
+                    text: "We decided to launch the onboarding refresh next Tuesday after QA signs off."
+                ),
+                TranscriptSegment(
+                    text: "We still need to confirm who owns the customer email."
+                )
+            ],
+            enhancedNote: EnhancedNote(
+                summary: "Focused on launch decisions and unresolved ownership.",
+                keyDiscussionPoints: ["The team is considering a second analytics phase after launch."],
+                decisions: ["Ship the onboarding refresh next Tuesday after QA signs off."],
+                risksOrOpenQuestions: ["Ownership of the customer email is still open."]
+            )
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_208_100) }
+        )
+
+        model.submitAssistantDraftAction(.decisionsAndRisks, for: noteID)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+
+        XCTAssertTrue(completed)
+        let turn = try XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        XCTAssertEqual(turn.kind, .decisionsAndRisks)
+        XCTAssertEqual(turn.prompt, "Extract decisions and risks")
+        XCTAssertTrue(turn.response?.contains("Decision and risk readout for this meeting:") == true)
+        XCTAssertTrue(turn.response?.contains("Confirmed decisions") == true)
+        XCTAssertTrue(turn.response?.contains("Ship the onboarding refresh next Tuesday after QA signs off.") == true)
+        XCTAssertTrue(turn.response?.contains("Tentative / still under discussion") == true)
+        XCTAssertTrue(turn.response?.contains("considering a second analytics phase") == true)
+        XCTAssertTrue(turn.response?.contains("Open questions / risks") == true)
+        XCTAssertTrue(turn.response?.contains("Ownership of the customer email is still open.") == true)
+        XCTAssertTrue(turn.citations.contains(where: { $0.kind == .enhancedDecision }))
+        XCTAssertTrue(turn.citations.contains(where: { $0.kind == .enhancedRisk }))
+    }
+
     private func makeModel(
         notes: [MeetingNote],
         persistence: AppPersistence,
