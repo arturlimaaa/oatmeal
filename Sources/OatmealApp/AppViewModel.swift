@@ -1075,6 +1075,17 @@ final class AppViewModel {
         submitAssistantTurn(prompt, kind: kind, for: noteID)
     }
 
+    func retryAssistantTurn(_ turnID: UUID, for noteID: MeetingNote.ID) {
+        guard let note = store.note(id: noteID),
+              let turn = note.assistantThread.turns.first(where: { $0.id == turnID }),
+              turn.status == .failed,
+              !note.hasPendingAssistantTurn else {
+            return
+        }
+
+        submitAssistantTurn(turn.prompt, kind: turn.kind, for: noteID)
+    }
+
     private func submitAssistantTurn(
         _ prompt: String,
         kind: NoteAssistantTurnKind,

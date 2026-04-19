@@ -124,6 +124,134 @@ final class SingleMeetingAIWorkspaceTests: XCTestCase {
         XCTAssertFalse(model.selectedNote?.hasPendingAssistantTurn ?? true)
     }
 
+    func testRetryFailedAssistantTurnAppendsNewAttemptWithoutOverwritingFailedTurn() async throws {
+        let noteID = UUID(uuidString: "A3100000-0000-0000-0000-000000000003")!
+        let note = MeetingNote(
+            id: noteID,
+            title: "Launch QA",
+            origin: .quickNote(createdAt: date(1_700_202_500)),
+            rawNotes: "Need to confirm the last blocker before launch."
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: StubSingleMeetingAssistantService(
+                mode: .sequence([
+                    .failure("Oatmeal could not draft this answer right now."),
+                    .success("Recovered grounded answer")
+                ])
+            ),
+            nowProvider: { self.date(1_700_202_600) }
+        )
+
+        model.submitAssistantPrompt("What changed?", for: noteID)
+
+        let failed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .failed
+        }
+
+        XCTAssertTrue(failed)
+        let failedTurn = try XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        model.retryAssistantTurn(failedTurn.id, for: noteID)
+
+        XCTAssertEqual(model.selectedNote?.assistantThread.turns.count, 2)
+        XCTAssertEqual(model.selectedNote?.assistantThread.turns.first?.status, .failed)
+        XCTAssertEqual(model.selectedNote?.assistantThread.turns.last?.status, .pending)
+
+        let retried = await waitUntil {
+            model.selectedNote?.assistantThread.turns.last?.status == .completed
+        }
+
+        XCTAssertTrue(retried)
+        let turns = try XCTUnwrap(model.selectedNote?.assistantThread.turns)
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertEqual(turns[0].status, .failed)
+        XCTAssertEqual(turns[0].prompt, "What changed?")
+        XCTAssertEqual(turns[1].status, .completed)
+        XCTAssertEqual(turns[1].prompt, "What changed?")
+        XCTAssertEqual(turns[1].kind, .prompt)
+        XCTAssertEqual(turns[1].response, "Recovered grounded answer")
+    }
+
+    func testAssistantCitationNavigationTargetOnlyResolvesTranscriptCitationForCurrentNote() {
+        let transcriptSegmentID = UUID(uuidString: "A3200000-0000-0000-0000-000000000003")!
+        let note = MeetingNote(
+            id: UUID(uuidString: "A3210000-0000-0000-0000-000000000003")!,
+            title: "Navigation test",
+            origin: .quickNote(createdAt: date(1_700_202_700)),
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: transcriptSegmentID,
+                    text: "We decided to send the launch email on Tuesday."
+                )
+            ]
+        )
+
+        let transcriptCitation = NoteAssistantCitation(
+            kind: .transcriptSegment,
+            label: "Transcript",
+            excerpt: "We decided to send the launch email on Tuesday.",
+            transcriptSegmentID: transcriptSegmentID
+        )
+        let missingTranscriptCitation = NoteAssistantCitation(
+            kind: .transcriptSegment,
+            label: "Transcript",
+            excerpt: "Unrelated transcript segment.",
+            transcriptSegmentID: UUID()
+        )
+        let rawNotesCitation = NoteAssistantCitation(
+            kind: .rawNotes,
+            label: "Raw notes",
+            excerpt: "Need to send the launch email."
+        )
+
+        XCTAssertEqual(
+            AssistantCitationNavigationTarget.resolve(citation: transcriptCitation, in: note),
+            AssistantCitationNavigationTarget(transcriptSegmentID: transcriptSegmentID)
+        )
+        XCTAssertNil(AssistantCitationNavigationTarget.resolve(citation: missingTranscriptCitation, in: note))
+        XCTAssertNil(AssistantCitationNavigationTarget.resolve(citation: rawNotesCitation, in: note))
+    }
+
+    func testAIWorkspacePresentationStateExplainsUnavailableAndFallbackModes() {
+        let unavailableNote = MeetingNote(
+            id: UUID(uuidString: "A3300000-0000-0000-0000-000000000003")!,
+            title: "Unavailable workspace",
+            origin: .quickNote(createdAt: date(1_700_202_800))
+        )
+        let unavailableState = AIWorkspacePresentationState.make(
+            note: unavailableNote,
+            summaryExecutionPlan: nil
+        )
+
+        XCTAssertFalse(unavailableState.canInteract)
+        XCTAssertTrue(unavailableState.introText.contains("needs local meeting material"))
+        XCTAssertTrue(unavailableState.emptyStateText.contains("Add a few raw notes"))
+
+        let fallbackNote = MeetingNote(
+            id: UUID(uuidString: "A3400000-0000-0000-0000-000000000003")!,
+            title: "Fallback workspace",
+            origin: .quickNote(createdAt: date(1_700_202_900)),
+            rawNotes: "Need to verify the rollout timing."
+        )
+        let fallbackPlan = LocalSummaryExecutionPlan(
+            backend: .placeholder,
+            executionKind: .placeholder,
+            summary: "Oatmeal will use the placeholder summary backend."
+        )
+        let fallbackState = AIWorkspacePresentationState.make(
+            note: fallbackNote,
+            summaryExecutionPlan: fallbackPlan
+        )
+
+        XCTAssertTrue(fallbackState.canInteract)
+        XCTAssertTrue(fallbackState.introText.contains("richer local summary path is unavailable"))
+        XCTAssertTrue(fallbackState.composerFootnote.contains("safer local fallback path"))
+    }
+
     func testGroundedAssistantResponseIncludesTranscriptCitationsFromSelectedNoteOnly() async {
         let targetSegmentID = UUID(uuidString: "B4000000-0000-0000-0000-000000000004")!
         let targetNote = MeetingNote(
@@ -630,9 +758,10 @@ private actor StubSingleMeetingAssistantService: SingleMeetingAssistantServicing
     enum Mode {
         case success(String, [NoteAssistantCitation] = [])
         case failure(String)
+        case sequence([Mode])
     }
 
-    private let mode: Mode
+    private var mode: Mode
     private let responseDelayNanoseconds: UInt64
 
     init(
@@ -648,7 +777,9 @@ private actor StubSingleMeetingAssistantService: SingleMeetingAssistantServicing
             try? await Task.sleep(nanoseconds: responseDelayNanoseconds)
         }
 
-        switch mode {
+        let currentMode = dequeueMode()
+
+        switch currentMode {
         case let .success(text, citations):
             return SingleMeetingAssistantResponse(
                 text: text,
@@ -657,6 +788,22 @@ private actor StubSingleMeetingAssistantService: SingleMeetingAssistantServicing
             )
         case let .failure(message):
             throw SingleMeetingAssistantError.failed(message)
+        case .sequence:
+            throw SingleMeetingAssistantError.failed("Sequence mode must dequeue to a concrete result.")
+        }
+    }
+
+    private func dequeueMode() -> Mode {
+        switch mode {
+        case let .sequence(steps):
+            guard let first = steps.first else {
+                return .failure("No stubbed assistant response remained.")
+            }
+            let remaining = Array(steps.dropFirst())
+            mode = remaining.isEmpty ? first : .sequence(remaining)
+            return first
+        case let concreteMode:
+            return concreteMode
         }
     }
 }
