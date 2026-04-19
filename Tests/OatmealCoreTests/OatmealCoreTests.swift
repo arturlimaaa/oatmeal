@@ -251,6 +251,26 @@ final class OatmealCoreTests: XCTestCase {
         XCTAssertEqual(note.assistantThread.turns[0].status, .completed)
     }
 
+    func testSubmittingAssistantDraftActionPersistsTurnKind() {
+        let requestedAt = date(1_700_020_580)
+        var note = MeetingNote(
+            title: "Drafting note",
+            origin: .quickNote(createdAt: requestedAt),
+            rawNotes: "Need to confirm launch timing and send a recap."
+        )
+
+        _ = note.submitAssistantPrompt(
+            "Draft a follow-up email",
+            kind: .followUpEmail,
+            at: requestedAt
+        )
+
+        XCTAssertEqual(note.assistantThread.turns.count, 1)
+        XCTAssertEqual(note.assistantThread.turns[0].kind, .followUpEmail)
+        XCTAssertEqual(note.assistantThread.turns[0].prompt, "Draft a follow-up email")
+        XCTAssertEqual(note.assistantThread.turns[0].status, .pending)
+    }
+
     func testLegacyAssistantTurnDecodesWithoutCitations() throws {
         let json = """
         {
@@ -266,6 +286,7 @@ final class OatmealCoreTests: XCTestCase {
         let turn = try JSONDecoder().decode(NoteAssistantTurn.self, from: Data(json.utf8))
 
         XCTAssertEqual(turn.citations, [])
+        XCTAssertEqual(turn.kind, .prompt)
         XCTAssertEqual(turn.status, .completed)
         XCTAssertEqual(turn.response, "We moved the launch by one week.")
     }

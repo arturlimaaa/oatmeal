@@ -4,6 +4,7 @@ import OatmealCore
 struct SingleMeetingAssistantRequest: Sendable {
     let noteID: MeetingNote.ID
     let noteTitle: String
+    let turnKind: NoteAssistantTurnKind
     let prompt: String
     let rawNotes: String
     let transcriptSegments: [TranscriptSegment]
@@ -73,37 +74,80 @@ private struct SingleMeetingAssistantGroundingPlanner {
         let citations = selectedEvidence.map(\.citation)
 
         guard !evidence.isEmpty else {
-            return SingleMeetingAssistantResponse(
-                text: """
-                I don’t have enough grounded meeting material in this note to answer “\(request.prompt)” yet.
-
-                Add raw notes or let Oatmeal finish the transcript first, and I’ll answer from that note only.
-                """,
-                citations: [],
-                generatedAt: generatedAt
-            )
+            return missingEvidenceResponse(generatedAt: generatedAt)
         }
 
         let hasStrongGrounding = selectedEvidence.contains { $0.score >= 6 }
         if !hasStrongGrounding {
-            let fallbackCitations = Array(citations.prefix(2))
-            let fallbackHighlights = Array(selectedEvidence.prefix(2)).map { sentence($0.summaryLine) }
-            let fallbackSummary = fallbackHighlights.isEmpty
-                ? "The current note only has light local evidence."
-                : fallbackHighlights.map { "• \($0)" }.joined(separator: "\n")
-
-            return SingleMeetingAssistantResponse(
-                text: """
-                I don’t have enough grounded context in this meeting note to answer “\(request.prompt)” confidently.
-
-                The closest note-local evidence I found is:
-                \(fallbackSummary)
-                """,
-                citations: fallbackCitations,
+            return weakGroundingResponse(
+                selectedEvidence: selectedEvidence,
+                citations: citations,
                 generatedAt: generatedAt
             )
         }
 
+        switch request.turnKind {
+        case .prompt:
+            return answerResponse(
+                selectedEvidence: selectedEvidence,
+                citations: citations,
+                generatedAt: generatedAt
+            )
+        case .followUpEmail:
+            return followUpEmailResponse(
+                selectedEvidence: selectedEvidence,
+                citations: citations,
+                generatedAt: generatedAt
+            )
+        case .slackRecap:
+            return slackRecapResponse(
+                selectedEvidence: selectedEvidence,
+                citations: citations,
+                generatedAt: generatedAt
+            )
+        }
+    }
+
+    private func missingEvidenceResponse(generatedAt: Date) -> SingleMeetingAssistantResponse {
+        SingleMeetingAssistantResponse(
+            text: """
+            I don’t have enough grounded meeting material in this note to \(requestedTaskDescription) yet.
+
+            Add raw notes or let Oatmeal finish the transcript first, and I’ll work from that note only.
+            """,
+            citations: [],
+            generatedAt: generatedAt
+        )
+    }
+
+    private func weakGroundingResponse(
+        selectedEvidence: [ScoredEvidence],
+        citations: [NoteAssistantCitation],
+        generatedAt: Date
+    ) -> SingleMeetingAssistantResponse {
+        let fallbackCitations = Array(citations.prefix(2))
+        let fallbackHighlights = Array(selectedEvidence.prefix(2)).map { sentence($0.summaryLine) }
+        let fallbackSummary = fallbackHighlights.isEmpty
+            ? "The current note only has light local evidence."
+            : fallbackHighlights.map { "• \($0)" }.joined(separator: "\n")
+
+        return SingleMeetingAssistantResponse(
+            text: """
+            I don’t have enough grounded context in this meeting note to \(requestedTaskDescription) confidently.
+
+            The closest note-local evidence I found is:
+            \(fallbackSummary)
+            """,
+            citations: fallbackCitations,
+            generatedAt: generatedAt
+        )
+    }
+
+    private func answerResponse(
+        selectedEvidence: [ScoredEvidence],
+        citations: [NoteAssistantCitation],
+        generatedAt: Date
+    ) -> SingleMeetingAssistantResponse {
         let answerBody = selectedEvidence.map { "• \(sentence($0.summaryLine))" }.joined(separator: "\n")
         let cautiousSuffix = selectedEvidence.count == 1
             ? "\n\nThis answer is grounded in a narrow slice of the note, so I’d treat it as partial."
@@ -114,6 +158,59 @@ private struct SingleMeetingAssistantGroundingPlanner {
             Based on this meeting note, the strongest grounded answer to “\(request.prompt)” is:
 
             \(answerBody)\(cautiousSuffix)
+            """,
+            citations: citations,
+            generatedAt: generatedAt
+        )
+    }
+
+    private func followUpEmailResponse(
+        selectedEvidence: [ScoredEvidence],
+        citations: [NoteAssistantCitation],
+        generatedAt: Date
+    ) -> SingleMeetingAssistantResponse {
+        let trimmedTitle = request.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = trimmedTitle.isEmpty ? "Follow-up" : "Follow-up: \(trimmedTitle)"
+        let meetingReference = trimmedTitle.isEmpty ? "today’s meeting" : "“\(trimmedTitle)”"
+        let bulletList = selectedEvidence.map { "- \(sentence($0.summaryLine))" }.joined(separator: "\n")
+
+        return SingleMeetingAssistantResponse(
+            text: """
+            Subject: \(subject)
+
+            \(emailGreeting)
+
+            Thanks again for the time today. Here’s a quick follow-up from \(meetingReference):
+
+            \(bulletList)
+
+            Please reply if I missed anything.
+
+            Thanks,
+            """,
+            citations: citations,
+            generatedAt: generatedAt
+        )
+    }
+
+    private func slackRecapResponse(
+        selectedEvidence: [ScoredEvidence],
+        citations: [NoteAssistantCitation],
+        generatedAt: Date
+    ) -> SingleMeetingAssistantResponse {
+        let trimmedTitle = request.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let openingLine = trimmedTitle.isEmpty
+            ? "Quick recap:"
+            : "Quick recap from \(trimmedTitle):"
+        let bulletList = selectedEvidence.map { "- \(sentence($0.summaryLine))" }.joined(separator: "\n")
+
+        return SingleMeetingAssistantResponse(
+            text: """
+            \(openingLine)
+
+            \(bulletList)
+
+            Let me know if I missed anything.
             """,
             citations: citations,
             generatedAt: generatedAt
@@ -195,7 +292,61 @@ private struct SingleMeetingAssistantGroundingPlanner {
             }
         }
 
+        switch request.turnKind {
+        case .prompt:
+            break
+        case .followUpEmail:
+            switch evidence.citation.kind {
+            case .enhancedActionItem:
+                score += 8
+            case .enhancedDecision:
+                score += 6
+            case .enhancedSummary, .rawNotes:
+                score += 5
+            case .metadata:
+                score += 2
+            default:
+                break
+            }
+        case .slackRecap:
+            switch evidence.citation.kind {
+            case .enhancedSummary, .rawNotes:
+                score += 7
+            case .enhancedDecision:
+                score += 6
+            case .enhancedActionItem, .enhancedKeyPoint:
+                score += 5
+            case .metadata:
+                score += 2
+            default:
+                break
+            }
+        }
+
         return score
+    }
+
+    private var requestedTaskDescription: String {
+        switch request.turnKind {
+        case .prompt:
+            return "answer “\(request.prompt)”"
+        case .followUpEmail:
+            return "draft a follow-up email"
+        case .slackRecap:
+            return "draft a Slack recap"
+        }
+    }
+
+    private var emailGreeting: String {
+        let attendeeNames = request.calendarEvent?.attendees.map(\.name) ?? []
+        switch attendeeNames.count {
+        case 1:
+            return "Hi \(attendeeNames[0]),"
+        case 2:
+            return "Hi \(attendeeNames[0]) and \(attendeeNames[1]),"
+        default:
+            return "Hi all,"
+        }
     }
 
     private func sentence(_ text: String) -> String {

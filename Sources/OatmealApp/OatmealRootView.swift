@@ -1,3 +1,6 @@
+#if canImport(AppKit)
+import AppKit
+#endif
 import OatmealCore
 import OatmealEdge
 import SwiftUI
@@ -174,6 +177,7 @@ struct OatmealRootView: View {
                     canRetryGeneration: model.canRetryGeneration(for: note),
                     setLiveTranscriptPanelPresented: { model.setLiveTranscriptPanelPresented($0, for: note.id) },
                     submitAssistantPrompt: { model.submitAssistantPrompt($0, for: note.id) },
+                    submitAssistantDraftAction: { model.submitAssistantDraftAction($0, for: note.id) },
                     retryTranscription: { model.retryTranscription() },
                     retryGeneration: { model.retryGeneration() }
                 )
@@ -649,6 +653,7 @@ private struct MeetingDetailView: View {
     let canRetryGeneration: Bool
     let setLiveTranscriptPanelPresented: (Bool) -> Void
     let submitAssistantPrompt: (String) -> Void
+    let submitAssistantDraftAction: (NoteAssistantTurnKind) -> Void
     let retryTranscription: () -> Void
     let retryGeneration: () -> Void
     @State private var isLiveTranscriptPanelExpanded = false
@@ -815,8 +820,29 @@ private struct MeetingDetailView: View {
                 Text("Ask Oatmeal about this meeting. Answers stay scoped to this note and now cite the local transcript, notes, summary, or meeting metadata they came from.")
                     .foregroundStyle(.secondary)
 
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Quick Drafts")
+                        .font(.headline)
+
+                    HStack(spacing: 10) {
+                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isDraftingAction), id: \.self) { kind in
+                            Button {
+                                submitAssistantDraftAction(kind)
+                            } label: {
+                                Label(kind.displayLabel, systemImage: kind.actionSystemImage)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(note.hasPendingAssistantTurn)
+                        }
+                    }
+
+                    Text("These actions use the same grounded note-local thread as freeform prompts and save into the conversation below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if note.assistantThread.turns.isEmpty {
-                    Text("No assistant prompts yet. Ask what changed, what was decided, or what this meeting implies, and Oatmeal will answer from this note only.")
+                    Text("No assistant prompts yet. Ask what changed, what was decided, or generate a draft, and Oatmeal will work from this note only.")
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
@@ -829,7 +855,7 @@ private struct MeetingDetailView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Prompt")
+                    Text("Ask Anything")
                         .font(.headline)
 
                     TextEditor(text: $assistantPrompt)
@@ -2546,6 +2572,15 @@ private struct AssistantWorkspaceTurnView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
+                    if turn.kind.isDraftingAction {
+                        Text(turn.kind.displayLabel)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Color.accentColor)
+                    }
+
                     Spacer()
 
                     Text(turn.requestedAt.formatted(date: .omitted, time: .shortened))
@@ -2573,6 +2608,14 @@ private struct AssistantWorkspaceTurnView: View {
 
                     Spacer()
 
+                    if turn.status == .completed, turn.response?.isEmpty == false {
+                        Button(turn.kind.copyLabel) {
+                            copyResponseToPasteboard()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                    }
+
                     if let completedAt = turn.completedAt {
                         Text(completedAt.formatted(date: .omitted, time: .shortened))
                             .font(.caption)
@@ -2585,13 +2628,14 @@ private struct AssistantWorkspaceTurnView: View {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Generating a grounded answer for this meeting.")
+                        Text(turn.kind.pendingStatusMessage)
                             .foregroundStyle(.secondary)
                     }
                 case .completed:
                     VStack(alignment: .leading, spacing: 10) {
                         Text(turn.response ?? "No assistant response was saved for this turn.")
                             .foregroundStyle(.primary)
+                            .textSelection(.enabled)
 
                         if !turn.citations.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
@@ -2631,6 +2675,18 @@ private struct AssistantWorkspaceTurnView: View {
                     .fill(Color.secondary.opacity(0.08))
             )
         }
+    }
+
+    private func copyResponseToPasteboard() {
+        guard let response = turn.response, !response.isEmpty else {
+            return
+        }
+
+        #if canImport(AppKit)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(response, forType: .string)
+        #endif
     }
 }
 
@@ -2681,6 +2737,39 @@ private extension NoteTranscriptionExecutionKind {
             "System Service"
         case .placeholder:
             "Placeholder"
+        }
+    }
+}
+
+private extension NoteAssistantTurnKind {
+    var actionSystemImage: String {
+        switch self {
+        case .prompt:
+            "text.bubble"
+        case .followUpEmail:
+            "envelope"
+        case .slackRecap:
+            "bubble.left.and.bubble.right"
+        }
+    }
+
+    var pendingStatusMessage: String {
+        switch self {
+        case .prompt:
+            "Generating a grounded answer for this meeting."
+        case .followUpEmail:
+            "Drafting a grounded follow-up email for this meeting."
+        case .slackRecap:
+            "Drafting a grounded Slack recap for this meeting."
+        }
+    }
+
+    var copyLabel: String {
+        switch self {
+        case .prompt:
+            "Copy Response"
+        case .followUpEmail, .slackRecap:
+            "Copy Draft"
         }
     }
 }

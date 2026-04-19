@@ -221,6 +221,27 @@ public enum NoteAssistantTurnStatus: String, Codable, Equatable, Sendable {
     }
 }
 
+public enum NoteAssistantTurnKind: String, Codable, Equatable, Sendable, CaseIterable {
+    case prompt
+    case followUpEmail
+    case slackRecap
+
+    public var displayLabel: String {
+        switch self {
+        case .prompt:
+            "Prompt"
+        case .followUpEmail:
+            "Follow-up Email"
+        case .slackRecap:
+            "Slack Recap"
+        }
+    }
+
+    public var isDraftingAction: Bool {
+        self != .prompt
+    }
+}
+
 public enum NoteAssistantCitationKind: String, Codable, Equatable, Sendable {
     case transcriptSegment
     case rawNotes
@@ -277,6 +298,7 @@ public struct NoteAssistantCitation: Codable, Equatable, Sendable, Identifiable 
 
 public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
+    public var kind: NoteAssistantTurnKind
     public var prompt: String
     public var response: String?
     public var citations: [NoteAssistantCitation]
@@ -287,6 +309,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
 
     public init(
         id: UUID = UUID(),
+        kind: NoteAssistantTurnKind = .prompt,
         prompt: String,
         response: String? = nil,
         citations: [NoteAssistantCitation] = [],
@@ -296,6 +319,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
         failureMessage: String? = nil
     ) {
         self.id = id
+        self.kind = kind
         self.prompt = prompt
         self.response = response
         self.citations = citations
@@ -307,6 +331,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id
+        case kind
         case prompt
         case response
         case citations
@@ -319,6 +344,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decodeIfPresent(NoteAssistantTurnKind.self, forKey: .kind) ?? .prompt
         prompt = try container.decode(String.self, forKey: .prompt)
         response = try container.decodeIfPresent(String.self, forKey: .response)
         citations = try container.decodeIfPresent([NoteAssistantCitation].self, forKey: .citations) ?? []
@@ -331,6 +357,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
         try container.encode(prompt, forKey: .prompt)
         try container.encodeIfPresent(response, forKey: .response)
         try container.encode(citations, forKey: .citations)
@@ -366,9 +393,11 @@ public struct NoteAssistantThread: Codable, Equatable, Sendable {
     @discardableResult
     public mutating func submitPrompt(
         _ prompt: String,
+        kind: NoteAssistantTurnKind = .prompt,
         at date: Date = Date()
     ) -> UUID {
         let turn = NoteAssistantTurn(
+            kind: kind,
             prompt: prompt,
             requestedAt: date,
             status: .pending
@@ -1568,9 +1597,10 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     @discardableResult
     public mutating func submitAssistantPrompt(
         _ prompt: String,
+        kind: NoteAssistantTurnKind = .prompt,
         at updatedAt: Date = Date()
     ) -> UUID {
-        let turnID = assistantThread.submitPrompt(prompt, at: updatedAt)
+        let turnID = assistantThread.submitPrompt(prompt, kind: kind, at: updatedAt)
         self.updatedAt = updatedAt
         return turnID
     }

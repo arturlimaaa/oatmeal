@@ -1060,6 +1060,26 @@ final class AppViewModel {
     }
 
     func submitAssistantPrompt(_ prompt: String, for noteID: MeetingNote.ID) {
+        submitAssistantTurn(
+            prompt,
+            kind: .prompt,
+            for: noteID
+        )
+    }
+
+    func submitAssistantDraftAction(_ kind: NoteAssistantTurnKind, for noteID: MeetingNote.ID) {
+        guard let prompt = kind.assistantRecipePrompt else {
+            return
+        }
+
+        submitAssistantTurn(prompt, kind: kind, for: noteID)
+    }
+
+    private func submitAssistantTurn(
+        _ prompt: String,
+        kind: NoteAssistantTurnKind,
+        for noteID: MeetingNote.ID
+    ) {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty,
               var note = store.note(id: noteID),
@@ -1069,7 +1089,7 @@ final class AppViewModel {
         }
 
         let requestedAt = nowProvider()
-        let turnID = note.submitAssistantPrompt(trimmedPrompt, at: requestedAt)
+        let turnID = note.submitAssistantPrompt(trimmedPrompt, kind: kind, at: requestedAt)
         persist(note)
 
         assistantTasks[noteID]?.cancel()
@@ -1079,6 +1099,7 @@ final class AppViewModel {
                     to: SingleMeetingAssistantRequest(
                         noteID: note.id,
                         noteTitle: note.title,
+                        turnKind: kind,
                         prompt: trimmedPrompt,
                         rawNotes: note.rawNotes,
                         transcriptSegments: note.transcriptSegments,
@@ -2233,5 +2254,18 @@ struct SummaryModelOperationState: Equatable {
 private extension String {
     var nilIfBlank: String? {
         isEmpty ? nil : self
+    }
+}
+
+private extension NoteAssistantTurnKind {
+    var assistantRecipePrompt: String? {
+        switch self {
+        case .prompt:
+            return nil
+        case .followUpEmail:
+            return "Draft a follow-up email"
+        case .slackRecap:
+            return "Draft a Slack recap"
+        }
     }
 }

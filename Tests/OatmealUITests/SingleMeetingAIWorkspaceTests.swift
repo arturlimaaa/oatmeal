@@ -210,6 +210,128 @@ final class SingleMeetingAIWorkspaceTests: XCTestCase {
         XCTAssertTrue(turn?.citations.allSatisfy { $0.kind != .transcriptSegment } == true)
     }
 
+    func testFollowUpEmailDraftActionUsesGroundedAssistantThreadAndSelectedNoteOnly() async throws {
+        let targetSegmentID = UUID(uuidString: "C6000000-0000-0000-0000-000000000006")!
+        let targetNote = MeetingNote(
+            id: UUID(uuidString: "C6000000-0000-0000-0000-000000000006")!,
+            title: "Launch Review",
+            origin: .quickNote(createdAt: date(1_700_205_000)),
+            calendarEvent: CalendarEvent(
+                id: UUID(uuidString: "C6000000-0000-0000-0000-000000000016")!,
+                title: "Launch Review",
+                startDate: date(1_700_205_000),
+                endDate: date(1_700_205_900),
+                attendees: [
+                    MeetingParticipant(name: "Alex"),
+                    MeetingParticipant(name: "Sam")
+                ],
+                source: .googleCalendar
+            ),
+            rawNotes: "Aligned on the onboarding refresh launch plan.",
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: targetSegmentID,
+                    speakerName: "Alex",
+                    text: "We decided to ship the onboarding refresh next Tuesday after QA signs off."
+                )
+            ],
+            enhancedNote: EnhancedNote(
+                summary: "Aligned on the onboarding refresh launch plan.",
+                decisions: ["Ship the onboarding refresh next Tuesday after QA signs off."],
+                actionItems: [ActionItem(text: "QA will confirm the checklist on Monday morning.", assignee: "Sam")]
+            )
+        )
+        let unrelatedSegmentID = UUID(uuidString: "C6000000-0000-0000-0000-000000000099")!
+        let unrelatedNote = MeetingNote(
+            id: UUID(uuidString: "C6000000-0000-0000-0000-000000000098")!,
+            title: "Different meeting",
+            origin: .quickNote(createdAt: date(1_700_204_900)),
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: unrelatedSegmentID,
+                    text: "This unrelated note focuses on pricing changes."
+                )
+            ]
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [targetNote, unrelatedNote],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_205_100) }
+        )
+
+        model.setSelectedNoteID(targetNote.id)
+        model.submitAssistantDraftAction(.followUpEmail, for: targetNote.id)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+
+        XCTAssertTrue(completed)
+        let turn = try XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        XCTAssertEqual(turn.kind, .followUpEmail)
+        XCTAssertEqual(turn.prompt, "Draft a follow-up email")
+        XCTAssertTrue(turn.response?.contains("Subject: Follow-up: Launch Review") == true)
+        XCTAssertTrue(turn.response?.contains("Hi Alex and Sam,") == true)
+        XCTAssertFalse(turn.citations.isEmpty)
+        XCTAssertTrue(
+            turn.citations.contains { citation in
+                citation.excerpt.contains("onboarding refresh") || citation.excerpt.contains("checklist")
+            }
+        )
+        XCTAssertFalse(turn.citations.contains(where: { $0.transcriptSegmentID == unrelatedSegmentID }))
+    }
+
+    func testSlackRecapDraftActionPersistsAcrossRelaunch() async throws {
+        let noteID = UUID(uuidString: "C7000000-0000-0000-0000-000000000007")!
+        let note = MeetingNote(
+            id: noteID,
+            title: "Customer Debrief",
+            origin: .quickNote(createdAt: date(1_700_206_000)),
+            rawNotes: "Customer wants a revised rollout plan by Friday.",
+            transcriptSegments: [
+                TranscriptSegment(text: "We should send the revised rollout plan by Friday.")
+            ],
+            enhancedNote: EnhancedNote(
+                summary: "Customer asked for a revised rollout plan by Friday.",
+                actionItems: [ActionItem(text: "Send the revised rollout plan by Friday.", assignee: "Jordan")]
+            )
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_206_100) }
+        )
+
+        model.submitAssistantDraftAction(.slackRecap, for: noteID)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+        XCTAssertTrue(completed)
+
+        let restored = makeModel(
+            notes: [],
+            persistence: persistence,
+            assistantService: StubSingleMeetingAssistantService(mode: .success("Unused")),
+            nowProvider: { self.date(1_700_206_200) }
+        )
+
+        let restoredNote = try XCTUnwrap(restored.notes.first(where: { $0.id == noteID }))
+        XCTAssertEqual(restoredNote.assistantThread.turns.count, 1)
+        XCTAssertEqual(restoredNote.assistantThread.turns[0].kind, .slackRecap)
+        XCTAssertEqual(restoredNote.assistantThread.turns[0].prompt, "Draft a Slack recap")
+        XCTAssertTrue(restoredNote.assistantThread.turns[0].response?.contains("Quick recap from Customer Debrief:") == true)
+        XCTAssertEqual(restoredNote.assistantThread.turns[0].status, .completed)
+    }
+
     private func makeModel(
         notes: [MeetingNote],
         persistence: AppPersistence,
