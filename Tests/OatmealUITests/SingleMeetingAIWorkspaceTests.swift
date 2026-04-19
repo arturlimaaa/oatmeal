@@ -86,6 +86,7 @@ final class SingleMeetingAIWorkspaceTests: XCTestCase {
         XCTAssertEqual(restoredNote.assistantThread.turns[0].prompt, "Summarize the next step.")
         XCTAssertEqual(restoredNote.assistantThread.turns[0].response, "Persisted response")
         XCTAssertEqual(restoredNote.assistantThread.turns[0].status, .completed)
+        XCTAssertEqual(restoredNote.assistantThread.turns[0].citations, [])
     }
 
     func testAssistantFailureStateIsPersistedOnTheNote() async {
@@ -121,6 +122,92 @@ final class SingleMeetingAIWorkspaceTests: XCTestCase {
             "Oatmeal could not draft this answer right now."
         )
         XCTAssertFalse(model.selectedNote?.hasPendingAssistantTurn ?? true)
+    }
+
+    func testGroundedAssistantResponseIncludesTranscriptCitationsFromSelectedNoteOnly() async {
+        let targetSegmentID = UUID(uuidString: "B4000000-0000-0000-0000-000000000004")!
+        let targetNote = MeetingNote(
+            id: UUID(uuidString: "B4000000-0000-0000-0000-000000000004")!,
+            title: "Onboarding Review",
+            origin: .quickNote(createdAt: date(1_700_203_000)),
+            rawNotes: "Need to confirm the onboarding rollout window.",
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: targetSegmentID,
+                    speakerName: "Alex",
+                    text: "We decided to launch the onboarding refresh next Tuesday after QA signs off."
+                ),
+                TranscriptSegment(
+                    id: UUID(uuidString: "B4000000-0000-0000-0000-000000000005")!,
+                    speakerName: "Sam",
+                    text: "QA will confirm the checklist on Monday morning."
+                )
+            ]
+        )
+        let unrelatedSegmentID = UUID(uuidString: "B4000000-0000-0000-0000-000000000099")!
+        let unrelatedNote = MeetingNote(
+            id: UUID(uuidString: "B4000000-0000-0000-0000-000000000098")!,
+            title: "Different meeting",
+            origin: .quickNote(createdAt: date(1_700_202_500)),
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: unrelatedSegmentID,
+                    text: "This unrelated note talks about pricing, not onboarding."
+                )
+            ]
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [targetNote, unrelatedNote],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_203_100) }
+        )
+
+        model.setSelectedNoteID(targetNote.id)
+        model.submitAssistantPrompt("What did we decide about onboarding?", for: targetNote.id)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+
+        XCTAssertTrue(completed)
+        let turn = try? XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        XCTAssertTrue(turn?.response?.contains("Based on this meeting note") == true)
+        XCTAssertTrue(turn?.citations.contains(where: { $0.transcriptSegmentID == targetSegmentID }) == true)
+        XCTAssertFalse(turn?.citations.contains(where: { $0.transcriptSegmentID == unrelatedSegmentID }) == true)
+    }
+
+    func testGroundedAssistantAdmitsUncertaintyWhenMeetingContextIsWeak() async {
+        let noteID = UUID(uuidString: "B5000000-0000-0000-0000-000000000005")!
+        let note = MeetingNote(
+            id: noteID,
+            title: "Budget Check-in",
+            origin: .quickNote(createdAt: date(1_700_204_000)),
+            rawNotes: "Reviewed current infrastructure budget."
+        )
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: GroundedSingleMeetingAssistantService(responseDelay: 0),
+            nowProvider: { self.date(1_700_204_100) }
+        )
+
+        model.submitAssistantPrompt("What did we decide about onboarding ownership?", for: noteID)
+
+        let completed = await waitUntil {
+            model.selectedNote?.assistantThread.turns.first?.status == .completed
+        }
+
+        XCTAssertTrue(completed)
+        let turn = try? XCTUnwrap(model.selectedNote?.assistantThread.turns.first)
+        XCTAssertTrue(turn?.response?.contains("don’t have enough grounded context") == true)
+        XCTAssertTrue(turn?.citations.allSatisfy { $0.kind != .transcriptSegment } == true)
     }
 
     private func makeModel(
@@ -305,7 +392,7 @@ private struct AIWorkspaceStubSummaryModelManager: LocalSummaryModelManaging {
 
 private actor StubSingleMeetingAssistantService: SingleMeetingAssistantServicing {
     enum Mode {
-        case success(String)
+        case success(String, [NoteAssistantCitation] = [])
         case failure(String)
     }
 
@@ -326,8 +413,12 @@ private actor StubSingleMeetingAssistantService: SingleMeetingAssistantServicing
         }
 
         switch mode {
-        case let .success(text):
-            return SingleMeetingAssistantResponse(text: text, generatedAt: Date(timeIntervalSince1970: 1_700_999_999))
+        case let .success(text, citations):
+            return SingleMeetingAssistantResponse(
+                text: text,
+                citations: citations,
+                generatedAt: Date(timeIntervalSince1970: 1_700_999_999)
+            )
         case let .failure(message):
             throw SingleMeetingAssistantError.failed(message)
         }

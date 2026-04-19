@@ -8,10 +8,12 @@ struct SingleMeetingAssistantRequest: Sendable {
     let rawNotes: String
     let transcriptSegments: [TranscriptSegment]
     let enhancedNote: EnhancedNote?
+    let calendarEvent: CalendarEvent?
 }
 
 struct SingleMeetingAssistantResponse: Sendable {
     let text: String
+    let citations: [NoteAssistantCitation]
     let generatedAt: Date
 }
 
@@ -30,7 +32,7 @@ enum SingleMeetingAssistantError: LocalizedError, Equatable {
     }
 }
 
-struct PlaceholderSingleMeetingAssistantService: SingleMeetingAssistantServicing {
+struct GroundedSingleMeetingAssistantService: SingleMeetingAssistantServicing {
     private let responseDelayNanoseconds: UInt64
 
     init(responseDelay: TimeInterval = 0.35) {
@@ -49,41 +51,384 @@ struct PlaceholderSingleMeetingAssistantService: SingleMeetingAssistantServicing
             )
         }
 
-        let transcriptCount = request.transcriptSegments.count
-        let noteMaterialSummary: String
-        if let enhancedNote = trimmedOrNil(request.enhancedNote?.summary) {
-            noteMaterialSummary = "Enhanced note summary: \(enhancedNote)"
-        } else if trimmedOrNil(request.rawNotes) != nil {
-            noteMaterialSummary = "Raw notes are available for this meeting."
-        } else if transcriptCount > 0 {
-            let noun = transcriptCount == 1 ? "segment" : "segments"
-            noteMaterialSummary = "Transcript includes \(transcriptCount) \(noun)."
-        } else {
-            noteMaterialSummary = "Oatmeal will answer from the meeting note once richer grounding lands."
+        let planner = SingleMeetingAssistantGroundingPlanner(request: request)
+        return planner.makeResponse(generatedAt: Date())
+    }
+}
+
+private struct SingleMeetingAssistantGroundingPlanner {
+    private let request: SingleMeetingAssistantRequest
+    private let promptTokens: Set<String>
+    private let evidence: [Evidence]
+
+    init(request: SingleMeetingAssistantRequest) {
+        self.request = request
+        self.promptTokens = Self.normalizedTokens(from: request.prompt)
+        self.evidence = Self.buildEvidence(from: request)
+    }
+
+    func makeResponse(generatedAt: Date) -> SingleMeetingAssistantResponse {
+        let scoredEvidence = rankEvidence()
+        let selectedEvidence = Array(scoredEvidence.prefix(3))
+        let citations = selectedEvidence.map(\.citation)
+
+        guard !evidence.isEmpty else {
+            return SingleMeetingAssistantResponse(
+                text: """
+                I don’t have enough grounded meeting material in this note to answer “\(request.prompt)” yet.
+
+                Add raw notes or let Oatmeal finish the transcript first, and I’ll answer from that note only.
+                """,
+                citations: [],
+                generatedAt: generatedAt
+            )
         }
 
-        let response = """
-        Oatmeal is saving this assistant thread directly on “\(request.noteTitle)”.
+        let hasStrongGrounding = selectedEvidence.contains { $0.score >= 6 }
+        if !hasStrongGrounding {
+            let fallbackCitations = Array(citations.prefix(2))
+            let fallbackHighlights = Array(selectedEvidence.prefix(2)).map { sentence($0.summaryLine) }
+            let fallbackSummary = fallbackHighlights.isEmpty
+                ? "The current note only has light local evidence."
+                : fallbackHighlights.map { "• \($0)" }.joined(separator: "\n")
 
-        Prompt: \(request.prompt)
+            return SingleMeetingAssistantResponse(
+                text: """
+                I don’t have enough grounded context in this meeting note to answer “\(request.prompt)” confidently.
 
-        \(noteMaterialSummary)
+                The closest note-local evidence I found is:
+                \(fallbackSummary)
+                """,
+                citations: fallbackCitations,
+                generatedAt: generatedAt
+            )
+        }
 
-        This first workspace slice is intentionally narrow: the thread is durable and note-scoped, and richer grounded answers will land in the next issue.
-        """
+        let answerBody = selectedEvidence.map { "• \(sentence($0.summaryLine))" }.joined(separator: "\n")
+        let cautiousSuffix = selectedEvidence.count == 1
+            ? "\n\nThis answer is grounded in a narrow slice of the note, so I’d treat it as partial."
+            : ""
 
         return SingleMeetingAssistantResponse(
-            text: response,
-            generatedAt: Date()
+            text: """
+            Based on this meeting note, the strongest grounded answer to “\(request.prompt)” is:
+
+            \(answerBody)\(cautiousSuffix)
+            """,
+            citations: citations,
+            generatedAt: generatedAt
         )
     }
 
-    private func trimmedOrNil(_ value: String?) -> String? {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return nil
+    private func rankEvidence() -> [ScoredEvidence] {
+        evidence
+            .map { evidence in
+                ScoredEvidence(
+                    evidence: evidence,
+                    score: score(for: evidence)
+                )
+            }
+            .filter { $0.score > 0 }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+
+                if lhs.evidence.baseWeight != rhs.evidence.baseWeight {
+                    return lhs.evidence.baseWeight > rhs.evidence.baseWeight
+                }
+
+                return lhs.evidence.ordinal < rhs.evidence.ordinal
+            }
+    }
+
+    private func score(for evidence: Evidence) -> Double {
+        var score = evidence.baseWeight
+        let normalizedPrompt = request.prompt.lowercased()
+        let normalizedText = evidence.searchText
+
+        if !promptTokens.isEmpty {
+            let overlap = promptTokens.intersection(evidence.tokens)
+            score += Double(overlap.count) * 4
         }
 
-        return value
+        if normalizedText.contains(normalizedPrompt) && normalizedPrompt.count > 6 {
+            score += 8
+        }
+
+        if normalizedPrompt.contains("decision"), evidence.citation.kind == .enhancedDecision {
+            score += 8
+        }
+
+        if normalizedPrompt.contains("risk")
+            || normalizedPrompt.contains("question")
+            || normalizedPrompt.contains("blocker") {
+            if evidence.citation.kind == .enhancedRisk {
+                score += 8
+            }
+        }
+
+        if normalizedPrompt.contains("action")
+            || normalizedPrompt.contains("follow up")
+            || normalizedPrompt.contains("next step")
+            || normalizedPrompt.contains("owner") {
+            if evidence.citation.kind == .enhancedActionItem {
+                score += 8
+            }
+        }
+
+        if normalizedPrompt.contains("summary")
+            || normalizedPrompt.contains("recap")
+            || normalizedPrompt.contains("overview")
+            || normalizedPrompt.contains("what changed") {
+            if evidence.citation.kind == .enhancedSummary || evidence.citation.kind == .rawNotes {
+                score += 5
+            }
+        }
+
+        if normalizedPrompt.contains("who")
+            || normalizedPrompt.contains("attendee")
+            || normalizedPrompt.contains("when")
+            || normalizedPrompt.contains("where") {
+            if evidence.citation.kind == .metadata {
+                score += 6
+            }
+        }
+
+        return score
+    }
+
+    private func sentence(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return trimmed
+        }
+
+        if let last = trimmed.last, ".!?".contains(last) {
+            return trimmed
+        }
+
+        return trimmed + "."
+    }
+
+    private static func buildEvidence(from request: SingleMeetingAssistantRequest) -> [Evidence] {
+        var evidence: [Evidence] = []
+
+        for (index, segment) in request.transcriptSegments.enumerated() {
+            let speakerName = segment.speakerName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = speakerName.map { "Transcript • \($0)" } ?? "Transcript"
+            evidence.append(
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .transcriptSegment,
+                        label: label,
+                        excerpt: segment.text,
+                        transcriptSegmentID: segment.id
+                    ),
+                    summaryLine: segment.text,
+                    baseWeight: 3.5,
+                    ordinal: index
+                )
+            )
+        }
+
+        let rawLines = request.rawNotes
+            .split(separator: "\n")
+            .map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for (index, line) in rawLines.enumerated() {
+            evidence.append(
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .rawNotes,
+                        label: "Raw notes",
+                        excerpt: line
+                    ),
+                    summaryLine: line,
+                    baseWeight: 2.8,
+                    ordinal: 1_000 + index
+                )
+            )
+        }
+
+        if let enhancedNote = request.enhancedNote {
+            if !enhancedNote.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                evidence.append(
+                    Evidence(
+                        citation: NoteAssistantCitation(
+                            kind: .enhancedSummary,
+                            label: "Enhanced summary",
+                            excerpt: enhancedNote.summary
+                        ),
+                        summaryLine: enhancedNote.summary,
+                        baseWeight: 3.0,
+                        ordinal: 2_000
+                    )
+                )
+            }
+
+            evidence.append(contentsOf: enhancedNote.keyDiscussionPoints.enumerated().map { index, point in
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .enhancedKeyPoint,
+                        label: "Key point",
+                        excerpt: point
+                    ),
+                    summaryLine: point,
+                    baseWeight: 2.7,
+                    ordinal: 2_100 + index
+                )
+            })
+
+            evidence.append(contentsOf: enhancedNote.decisions.enumerated().map { index, decision in
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .enhancedDecision,
+                        label: "Decision",
+                        excerpt: decision
+                    ),
+                    summaryLine: decision,
+                    baseWeight: 3.1,
+                    ordinal: 2_200 + index
+                )
+            })
+
+            evidence.append(contentsOf: enhancedNote.risksOrOpenQuestions.enumerated().map { index, risk in
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .enhancedRisk,
+                        label: "Risk / question",
+                        excerpt: risk
+                    ),
+                    summaryLine: risk,
+                    baseWeight: 2.9,
+                    ordinal: 2_300 + index
+                )
+            })
+
+            evidence.append(contentsOf: enhancedNote.actionItems.enumerated().map { index, item in
+                let line = item.assignee.map { "\($0) owns: \(item.text)" } ?? item.text
+                return Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .enhancedActionItem,
+                        label: "Action item",
+                        excerpt: line
+                    ),
+                    summaryLine: line,
+                    baseWeight: 3.0,
+                    ordinal: 2_400 + index
+                )
+            })
+        }
+
+        evidence.append(contentsOf: metadataEvidence(from: request))
+        return evidence
+    }
+
+    private static func metadataEvidence(from request: SingleMeetingAssistantRequest) -> [Evidence] {
+        var evidence: [Evidence] = []
+        let title = request.noteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            evidence.append(
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .metadata,
+                        label: "Meeting title",
+                        excerpt: title
+                    ),
+                    summaryLine: "This note is for “\(title)”.",
+                    baseWeight: 1.0,
+                    ordinal: 3_000
+                )
+            )
+        }
+
+        guard let event = request.calendarEvent else {
+            return evidence
+        }
+
+        evidence.append(
+            Evidence(
+                citation: NoteAssistantCitation(
+                    kind: .metadata,
+                    label: "Calendar timing",
+                    excerpt: "\(event.startDate.formatted(date: .abbreviated, time: .shortened)) to \(event.endDate.formatted(date: .omitted, time: .shortened))"
+                ),
+                summaryLine: "The calendar event ran from \(event.startDate.formatted(date: .abbreviated, time: .shortened)) to \(event.endDate.formatted(date: .omitted, time: .shortened)).",
+                baseWeight: 1.1,
+                ordinal: 3_010
+            )
+        )
+
+        if !event.attendees.isEmpty {
+            let attendees = event.attendees.map(\.name).joined(separator: ", ")
+            evidence.append(
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .metadata,
+                        label: "Attendees",
+                        excerpt: attendees
+                    ),
+                    summaryLine: "Attendees: \(attendees)",
+                    baseWeight: 1.2,
+                    ordinal: 3_020
+                )
+            )
+        }
+
+        if let location = event.location?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !location.isEmpty {
+            evidence.append(
+                Evidence(
+                    citation: NoteAssistantCitation(
+                        kind: .metadata,
+                        label: "Location",
+                        excerpt: location
+                    ),
+                    summaryLine: "Location: \(location)",
+                    baseWeight: 1.1,
+                    ordinal: 3_030
+                )
+            )
+        }
+
+        return evidence
+    }
+
+    private static func normalizedTokens(from text: String) -> Set<String> {
+        let stopWords: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "did", "do", "for", "from",
+            "how", "i", "in", "is", "it", "me", "of", "on", "or", "that", "the", "this", "to",
+            "was", "we", "what", "when", "where", "who", "why", "with", "you"
+        ]
+
+        let components = text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+        return Set(components.filter { token in
+            token.count > 2 && !stopWords.contains(token)
+        })
+    }
+
+    private struct Evidence {
+        let citation: NoteAssistantCitation
+        let summaryLine: String
+        let baseWeight: Double
+        let ordinal: Int
+
+        var searchText: String {
+            [citation.label, citation.excerpt, summaryLine].joined(separator: " ").lowercased()
+        }
+
+        var tokens: Set<String> {
+            SingleMeetingAssistantGroundingPlanner.normalizedTokens(from: searchText)
+        }
+    }
+
+    private struct ScoredEvidence {
+        let evidence: Evidence
+        let score: Double
+
+        var citation: NoteAssistantCitation { evidence.citation }
+        var summaryLine: String { evidence.summaryLine }
     }
 }

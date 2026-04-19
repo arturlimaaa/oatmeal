@@ -105,7 +105,7 @@ final class AppViewModel {
         self.summaryModelManager = summaryModelManager ?? LocalSummaryModelManager(
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
-        self.assistantService = assistantService ?? PlaceholderSingleMeetingAssistantService()
+        self.assistantService = assistantService ?? GroundedSingleMeetingAssistantService()
 
         restorePersistedState()
         refresh()
@@ -1082,7 +1082,8 @@ final class AppViewModel {
                         prompt: trimmedPrompt,
                         rawNotes: note.rawNotes,
                         transcriptSegments: note.transcriptSegments,
-                        enhancedNote: note.enhancedNote
+                        enhancedNote: note.enhancedNote,
+                        calendarEvent: note.calendarEvent
                     )
                 )
 
@@ -1095,6 +1096,7 @@ final class AppViewModel {
                     _ = latestNote.completeAssistantTurn(
                         id: turnID,
                         response: response.text,
+                        citations: response.citations,
                         at: response.generatedAt
                     )
                     self.persist(latestNote)

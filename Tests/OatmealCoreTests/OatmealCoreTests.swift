@@ -215,6 +215,61 @@ final class OatmealCoreTests: XCTestCase {
         )
     }
 
+    func testCompletingAssistantTurnPersistsGroundingCitations() {
+        let requestedAt = date(1_700_020_500)
+        var note = MeetingNote(
+            title: "Grounded assistant note",
+            origin: .quickNote(createdAt: requestedAt),
+            transcriptSegments: [
+                TranscriptSegment(
+                    id: UUID(uuidString: "D0000000-0000-0000-0000-000000000001")!,
+                    text: "We decided to ship the onboarding refresh next Tuesday."
+                )
+            ]
+        )
+
+        let turnID = note.submitAssistantPrompt("What did we decide?", at: requestedAt)
+        let citations = [
+            NoteAssistantCitation(
+                kind: .transcriptSegment,
+                label: "Transcript",
+                excerpt: "We decided to ship the onboarding refresh next Tuesday.",
+                transcriptSegmentID: note.transcriptSegments[0].id
+            )
+        ]
+
+        XCTAssertTrue(
+            note.completeAssistantTurn(
+                id: turnID,
+                response: "The meeting decided to ship the onboarding refresh next Tuesday.",
+                citations: citations,
+                at: date(1_700_020_550)
+            )
+        )
+
+        XCTAssertEqual(note.assistantThread.turns[0].citations, citations)
+        XCTAssertEqual(note.assistantThread.turns[0].status, .completed)
+    }
+
+    func testLegacyAssistantTurnDecodesWithoutCitations() throws {
+        let json = """
+        {
+          "id": "E0000000-0000-0000-0000-000000000001",
+          "prompt": "What changed?",
+          "response": "We moved the launch by one week.",
+          "requestedAt": 12345,
+          "completedAt": 12346,
+          "status": "completed"
+        }
+        """
+
+        let turn = try JSONDecoder().decode(NoteAssistantTurn.self, from: Data(json.utf8))
+
+        XCTAssertEqual(turn.citations, [])
+        XCTAssertEqual(turn.status, .completed)
+        XCTAssertEqual(turn.response, "We moved the launch by one week.")
+    }
+
     func testLegacyPendingTranscriptionDecodesRecoverableProcessingState() throws {
         let noteID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let originCreatedAt = date(1_700_000_000)

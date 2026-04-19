@@ -812,11 +812,11 @@ private struct MeetingDetailView: View {
     private var aiWorkspaceSection: some View {
         DetailCard(title: "AI Workspace") {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Ask Oatmeal about this meeting. This first slice keeps the thread scoped to one note and saves each prompt and answer locally with the note.")
+                Text("Ask Oatmeal about this meeting. Answers stay scoped to this note and now cite the local transcript, notes, summary, or meeting metadata they came from.")
                     .foregroundStyle(.secondary)
 
                 if note.assistantThread.turns.isEmpty {
-                    Text("No assistant prompts yet. Ask for a recap, a draft follow-up, or a quick explanation of what changed in this meeting.")
+                    Text("No assistant prompts yet. Ask what changed, what was decided, or what this meeting implies, and Oatmeal will answer from this note only.")
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
@@ -2585,12 +2585,40 @@ private struct AssistantWorkspaceTurnView: View {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Generating a note-scoped answer for this meeting.")
+                        Text("Generating a grounded answer for this meeting.")
                             .foregroundStyle(.secondary)
                     }
                 case .completed:
-                    Text(turn.response ?? "No assistant response was saved for this turn.")
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(turn.response ?? "No assistant response was saved for this turn.")
+                            .foregroundStyle(.primary)
+
+                        if !turn.citations.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Sources")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+
+                                ForEach(turn.citations) { citation in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(citation.label)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Text(citation.excerpt)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .fill(Color.primary.opacity(0.04))
+                                    )
+                                }
+                            }
+                        }
+                    }
                 case .failed:
                     Text(turn.failureMessage ?? "Oatmeal could not complete this answer.")
                         .foregroundStyle(.secondary)

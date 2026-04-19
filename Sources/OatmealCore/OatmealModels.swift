@@ -221,10 +221,65 @@ public enum NoteAssistantTurnStatus: String, Codable, Equatable, Sendable {
     }
 }
 
+public enum NoteAssistantCitationKind: String, Codable, Equatable, Sendable {
+    case transcriptSegment
+    case rawNotes
+    case enhancedSummary
+    case enhancedKeyPoint
+    case enhancedDecision
+    case enhancedRisk
+    case enhancedActionItem
+    case metadata
+
+    public var displayLabel: String {
+        switch self {
+        case .transcriptSegment:
+            "Transcript"
+        case .rawNotes:
+            "Raw notes"
+        case .enhancedSummary:
+            "Summary"
+        case .enhancedKeyPoint:
+            "Key point"
+        case .enhancedDecision:
+            "Decision"
+        case .enhancedRisk:
+            "Risk / question"
+        case .enhancedActionItem:
+            "Action item"
+        case .metadata:
+            "Meeting context"
+        }
+    }
+}
+
+public struct NoteAssistantCitation: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var kind: NoteAssistantCitationKind
+    public var label: String
+    public var excerpt: String
+    public var transcriptSegmentID: UUID?
+
+    public init(
+        id: UUID = UUID(),
+        kind: NoteAssistantCitationKind,
+        label: String,
+        excerpt: String,
+        transcriptSegmentID: UUID? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.excerpt = excerpt
+        self.transcriptSegmentID = transcriptSegmentID
+    }
+}
+
 public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var prompt: String
     public var response: String?
+    public var citations: [NoteAssistantCitation]
     public var requestedAt: Date
     public var completedAt: Date?
     public var status: NoteAssistantTurnStatus
@@ -234,6 +289,7 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
         id: UUID = UUID(),
         prompt: String,
         response: String? = nil,
+        citations: [NoteAssistantCitation] = [],
         requestedAt: Date = Date(),
         completedAt: Date? = nil,
         status: NoteAssistantTurnStatus,
@@ -242,10 +298,46 @@ public struct NoteAssistantTurn: Codable, Equatable, Sendable, Identifiable {
         self.id = id
         self.prompt = prompt
         self.response = response
+        self.citations = citations
         self.requestedAt = requestedAt
         self.completedAt = completedAt
         self.status = status
         self.failureMessage = failureMessage
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case prompt
+        case response
+        case citations
+        case requestedAt
+        case completedAt
+        case status
+        case failureMessage
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        response = try container.decodeIfPresent(String.self, forKey: .response)
+        citations = try container.decodeIfPresent([NoteAssistantCitation].self, forKey: .citations) ?? []
+        requestedAt = try container.decode(Date.self, forKey: .requestedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        status = try container.decode(NoteAssistantTurnStatus.self, forKey: .status)
+        failureMessage = try container.decodeIfPresent(String.self, forKey: .failureMessage)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encodeIfPresent(response, forKey: .response)
+        try container.encode(citations, forKey: .citations)
+        try container.encode(requestedAt, forKey: .requestedAt)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(failureMessage, forKey: .failureMessage)
     }
 }
 
@@ -290,6 +382,7 @@ public struct NoteAssistantThread: Codable, Equatable, Sendable {
     public mutating func completeTurn(
         id: UUID,
         response: String,
+        citations: [NoteAssistantCitation] = [],
         at date: Date = Date()
     ) -> Bool {
         guard let index = turns.firstIndex(where: { $0.id == id }) else {
@@ -297,6 +390,7 @@ public struct NoteAssistantThread: Codable, Equatable, Sendable {
         }
 
         turns[index].response = response
+        turns[index].citations = citations
         turns[index].completedAt = date
         turns[index].status = .completed
         turns[index].failureMessage = nil
@@ -317,6 +411,7 @@ public struct NoteAssistantThread: Codable, Equatable, Sendable {
         turns[index].completedAt = date
         turns[index].status = .failed
         turns[index].failureMessage = message
+        turns[index].citations = []
         updatedAt = date
         return true
     }
@@ -1484,9 +1579,15 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public mutating func completeAssistantTurn(
         id: UUID,
         response: String,
+        citations: [NoteAssistantCitation] = [],
         at updatedAt: Date = Date()
     ) -> Bool {
-        let didChange = assistantThread.completeTurn(id: id, response: response, at: updatedAt)
+        let didChange = assistantThread.completeTurn(
+            id: id,
+            response: response,
+            citations: citations,
+            at: updatedAt
+        )
         if didChange {
             self.updatedAt = updatedAt
         }
