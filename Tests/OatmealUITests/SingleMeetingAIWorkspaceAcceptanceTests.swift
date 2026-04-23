@@ -248,6 +248,7 @@ final class SingleMeetingAIWorkspaceAcceptanceTests: AIWorkspaceTestCase {
             selectedSidebarItem: .allNotes,
             selectedUpcomingEventID: nil,
             selectedNoteID: noteID,
+            selectedNoteWorkspaceMode: .ai,
             selectedTemplateID: nil,
             collapsedSessionControllerPresentationIdentity: nil,
             pendingMeetingDetection: nil,

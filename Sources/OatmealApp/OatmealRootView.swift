@@ -161,6 +161,7 @@ struct OatmealRootView: View {
             if let note = model.selectedNote {
                 MeetingDetailView(
                     note: note,
+                    workspaceState: model.noteWorkspaceState,
                     folder: model.folder(for: note),
                     template: model.selectedTemplate,
                     capturePermissions: model.capturePermissions,
@@ -176,6 +177,7 @@ struct OatmealRootView: View {
                     canRetryTranscription: model.canRetryTranscription(for: note),
                     canRetryGeneration: model.canRetryGeneration(for: note),
                     setLiveTranscriptPanelPresented: { model.setLiveTranscriptPanelPresented($0, for: note.id) },
+                    setSelectedWorkspaceMode: { model.setSelectedNoteWorkspaceMode($0) },
                     submitAssistantPrompt: { model.submitAssistantPrompt($0, for: note.id) },
                     submitAssistantDraftAction: { model.submitAssistantDraftAction($0, for: note.id) },
                     retryAssistantTurn: { model.retryAssistantTurn($0, for: note.id) },
@@ -638,6 +640,7 @@ private struct UpcomingEventDetailView: View {
 
 private struct MeetingDetailView: View {
     let note: MeetingNote
+    let workspaceState: NoteWorkspacePresentationState?
     let folder: NoteFolder?
     let template: NoteTemplate?
     let capturePermissions: CapturePermissions
@@ -653,6 +656,7 @@ private struct MeetingDetailView: View {
     let canRetryTranscription: Bool
     let canRetryGeneration: Bool
     let setLiveTranscriptPanelPresented: (Bool) -> Void
+    let setSelectedWorkspaceMode: (NoteWorkspaceMode) -> Void
     let submitAssistantPrompt: (String) -> Void
     let submitAssistantDraftAction: (NoteAssistantTurnKind) -> Void
     let retryAssistantTurn: (UUID) -> Void
@@ -673,38 +677,35 @@ private struct MeetingDetailView: View {
         )
     }
 
+    private var resolvedWorkspaceState: NoteWorkspacePresentationState {
+        workspaceState ?? NoteWorkspacePresentationState.make(
+            note: note,
+            selectedMode: .notes
+        )
+    }
+
     private var shouldShowLiveTranscriptPanel: Bool {
         isLiveTranscriptPanelExpanded || isLiveTranscriptPanelPresented
     }
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
-                    summaryCards
-                    aiWorkspaceSection
-                    metadataSection
-                    captureSection
-                    if let liveTranscriptPanelState {
-                        if shouldShowLiveTranscriptPanel {
-                            liveTranscriptSection(liveTranscriptPanelState)
-                        } else {
-                            liveTranscriptEntryPointSection(liveTranscriptPanelState)
-                        }
+            VStack(spacing: 0) {
+                workspaceHero
+                workspaceModeBar
+
+                Divider()
+                    .padding(.horizontal, 28)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        workspaceModeContent
                     }
-                    processingSection
-                    transcriptionSection
-                    summaryRuntimeSection
-                    rawNotesSection
-                    if liveTranscriptPanelState == nil {
-                        transcriptSection
-                    }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(workspaceBackground)
             .onAppear {
                 isLiveTranscriptPanelExpanded = isLiveTranscriptPanelPresented
             }
@@ -734,8 +735,8 @@ private struct MeetingDetailView: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var workspaceHero: some View {
+        VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(note.title)
@@ -766,7 +767,180 @@ private struct MeetingDetailView: View {
                 Text("Participants: \(attendees.joined(separator: ", "))")
                     .foregroundStyle(.secondary)
             }
+
+            let timestamp = note.calendarEvent?.startDate ?? note.captureState.startedAt ?? note.createdAt
+
+            HStack(spacing: 10) {
+                WorkspaceHeroBadge(
+                    title: "State",
+                    value: captureLabel,
+                    color: statusColor
+                )
+
+                WorkspaceHeroBadge(
+                    title: "When",
+                    value: timestamp.formatted(date: .abbreviated, time: .shortened),
+                    color: .secondary
+                )
+
+                if let folder {
+                    WorkspaceHeroBadge(
+                        title: "Folder",
+                        value: folder.name,
+                        color: .blue
+                    )
+                }
+            }
         }
+        .padding(28)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(nsColor: .controlBackgroundColor),
+                    Color(nsColor: .windowBackgroundColor)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+    }
+
+    private var workspaceModeBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(resolvedWorkspaceState.availableModes) { mode in
+                    Button {
+                        setSelectedWorkspaceMode(mode)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: mode.systemImage)
+                                .font(.system(size: 13, weight: .semibold))
+
+                            Text(mode.title)
+                                .font(.subheadline.weight(.semibold))
+
+                            if let badgeText = resolvedWorkspaceState.badgeText(for: mode, note: note) {
+                                Text(badgeText)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(
+                                        mode == resolvedWorkspaceState.selectedMode
+                                            ? Color.accentColor.opacity(0.18)
+                                            : Color.secondary.opacity(0.10),
+                                        in: Capsule()
+                                    )
+                            }
+                        }
+                        .foregroundStyle(mode == resolvedWorkspaceState.selectedMode ? .primary : .secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(mode == resolvedWorkspaceState.selectedMode ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(mode == resolvedWorkspaceState.selectedMode ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.08))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceModeContent: some View {
+        switch resolvedWorkspaceState.selectedMode {
+        case .notes:
+            notesWorkspace
+        case .transcript:
+            transcriptWorkspace
+        case .ai:
+            aiWorkspaceMode
+        case .tasks:
+            tasksWorkspace
+        }
+    }
+
+    private var notesWorkspace: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            summaryCards
+
+            if note.processingState.isActive || note.transcriptionStatus == .failed || note.generationStatus == .failed {
+                processingSection
+            }
+
+            if let liveTranscriptPanelState {
+                liveTranscriptEntryPointSection(liveTranscriptPanelState)
+            }
+
+            rawNotesSection
+
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 20) {
+                    metadataSection
+                    captureSection
+                    if !note.processingState.isActive && note.transcriptionStatus != .failed && note.generationStatus != .failed {
+                        processingSection
+                    }
+                    transcriptionSection
+                    summaryRuntimeSection
+                }
+                .padding(.top, 16)
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Technical Details")
+                        .font(.headline)
+                    Text("Runtime, capture, and processing details stay available here without taking over the note.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.08))
+            )
+        }
+    }
+
+    private var transcriptWorkspace: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            if let liveTranscriptPanelState {
+                if shouldShowLiveTranscriptPanel {
+                    liveTranscriptSection(liveTranscriptPanelState)
+                } else {
+                    liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                }
+            }
+
+            transcriptSection
+        }
+    }
+
+    private var aiWorkspaceMode: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            aiWorkspaceSection
+        }
+    }
+
+    private var tasksWorkspace: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            structuredTasksOverview
+            structuredWorkflowHistory
+        }
+    }
+
+    private var workspaceBackground: some View {
+        Color(nsColor: .textBackgroundColor)
     }
 
     private var summaryCards: some View {
@@ -935,6 +1109,104 @@ private struct MeetingDetailView: View {
                             !aiWorkspaceState.canInteract
                                 || assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || note.hasPendingAssistantTurn
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var structuredTasksOverview: some View {
+        DetailCard(title: "Tasks & Decisions") {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 10) {
+                    Button {
+                        submitAssistantDraftAction(.actionItems)
+                    } label: {
+                        Label("Refresh Action Items", systemImage: NoteAssistantTurnKind.actionItems.actionSystemImage)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
+
+                    Button {
+                        submitAssistantDraftAction(.decisionsAndRisks)
+                    } label: {
+                        Label("Refresh Decisions & Risks", systemImage: NoteAssistantTurnKind.decisionsAndRisks.actionSystemImage)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
+                }
+
+                let actionItems = note.enhancedNote?.actionItems ?? []
+                if actionItems.isEmpty {
+                    Text("No structured action items are attached to this note yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(actionItems) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.text)
+                                    .font(.headline)
+                                Text(item.assignee ?? "Unassigned")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                            )
+                        }
+                    }
+                }
+
+                if let enhanced = note.enhancedNote,
+                   !enhanced.decisions.isEmpty || !enhanced.risksOrOpenQuestions.isEmpty {
+                    Divider()
+
+                    if !enhanced.decisions.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Decisions")
+                                .font(.headline)
+
+                            ForEach(enhanced.decisions, id: \.self) { decision in
+                                Label(decision, systemImage: "checkmark.seal.fill")
+                                    .labelStyle(.oatmealBullet)
+                            }
+                        }
+                    }
+
+                    if !enhanced.risksOrOpenQuestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Risks & Open Questions")
+                                .font(.headline)
+
+                            ForEach(enhanced.risksOrOpenQuestions, id: \.self) { risk in
+                                Label(risk, systemImage: "exclamationmark.bubble.fill")
+                                    .labelStyle(.oatmealBullet)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var structuredWorkflowHistory: some View {
+        DetailCard(title: "Structured Workflow History") {
+            let workflowTurns = note.assistantThread.turns.filter { $0.kind.isStructuredWorkflow }
+
+            if workflowTurns.isEmpty {
+                Text("Run one of the structured workflows above and Oatmeal will keep the grounded readout here for this meeting.")
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(workflowTurns) { turn in
+                        AssistantWorkspaceTurnView(
+                            turn: turn,
+                            note: note,
+                            onOpenCitation: handleAssistantCitationTap(_:),
+                            onRetry: { retryAssistantTurn(turn.id) }
                         )
                     }
                 }
@@ -1267,6 +1539,7 @@ private struct MeetingDetailView: View {
             return
         }
 
+        setSelectedWorkspaceMode(.transcript)
         highlightedTranscriptSegmentID = route.transcriptSegmentID
     }
 
@@ -2364,6 +2637,34 @@ private struct LiveTranscriptStatusBadge: View {
             .padding(.vertical, 6)
             .background(color.opacity(0.12), in: Capsule())
             .foregroundStyle(color)
+    }
+}
+
+private struct WorkspaceHeroBadge: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(color.opacity(0.12))
+        )
     }
 }
 

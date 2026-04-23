@@ -62,6 +62,7 @@ final class AppViewModel {
     var selectedSidebarItem: SidebarItem = .upcoming
     var selectedUpcomingEventID: CalendarEvent.ID?
     var selectedNoteID: MeetingNote.ID?
+    var selectedNoteWorkspaceMode: NoteWorkspaceMode = .notes
     var selectedTemplateID: NoteTemplate.ID?
     var pendingMeetingDetection: PendingMeetingDetection?
     var searchText = ""
@@ -181,6 +182,16 @@ final class AppViewModel {
         MeetingDetectionPromptAdapter.promptState(for: pendingMeetingDetection)
     }
 
+    var noteWorkspaceState: NoteWorkspacePresentationState? {
+        guard let selectedNote else {
+            return nil
+        }
+        return NoteWorkspacePresentationState.make(
+            note: selectedNote,
+            selectedMode: selectedNoteWorkspaceMode
+        )
+    }
+
     var menuBarMeetingDetectionState: MeetingDetectionPromptState? {
         MeetingDetectionPromptAdapter.menuBarState(for: pendingMeetingDetection)
     }
@@ -232,6 +243,7 @@ final class AppViewModel {
         selectedSidebarItem = .allNotes
         selectedNoteID = state.noteID
         if openTranscript {
+            selectedNoteWorkspaceMode = .transcript
             setLiveTranscriptPanelPresented(true, for: state.noteID)
         }
         persistState()
@@ -246,6 +258,7 @@ final class AppViewModel {
             selectedNoteID = state.noteID
             let shouldOpenTranscript = openTranscript && state.canOpenTranscript
             if shouldOpenTranscript {
+                selectedNoteWorkspaceMode = .transcript
                 setLiveTranscriptPanelPresented(true, for: state.noteID)
             }
             persistState()
@@ -256,6 +269,7 @@ final class AppViewModel {
             selectedSidebarItem = .allNotes
             selectedNoteID = state.noteID
             if openTranscript && state.canOpenTranscript {
+                selectedNoteWorkspaceMode = .transcript
                 setLiveTranscriptPanelPresented(true, for: state.noteID)
             }
             persistState()
@@ -526,6 +540,11 @@ final class AppViewModel {
         persistState()
     }
 
+    func setSelectedNoteWorkspaceMode(_ mode: NoteWorkspaceMode) {
+        selectedNoteWorkspaceMode = mode
+        persistState()
+    }
+
     func setSelectedTemplateID(_ id: NoteTemplate.ID?) {
         selectedTemplateID = id
         persistState()
@@ -627,6 +646,7 @@ final class AppViewModel {
         refresh()
         selectedSidebarItem = .allNotes
         selectedNoteID = note.id
+        selectedNoteWorkspaceMode = .notes
         persistState()
     }
 
@@ -646,6 +666,7 @@ final class AppViewModel {
         refresh()
         selectedSidebarItem = .allNotes
         selectedNoteID = note.id
+        selectedNoteWorkspaceMode = .notes
         persistState()
     }
 
@@ -653,6 +674,8 @@ final class AppViewModel {
         if let existingNote = note(for: event) {
             selectedSidebarItem = .allNotes
             selectedNoteID = existingNote.id
+            selectedNoteWorkspaceMode = .notes
+            persistState()
             return
         }
 
@@ -672,6 +695,7 @@ final class AppViewModel {
         refresh()
         selectedSidebarItem = .allNotes
         selectedNoteID = note.id
+        selectedNoteWorkspaceMode = .notes
         persistState()
     }
 
@@ -1163,6 +1187,7 @@ final class AppViewModel {
             || snapshot.selectedSidebarItem != nil
             || snapshot.selectedUpcomingEventID != nil
             || snapshot.selectedNoteID != nil
+            || snapshot.selectedNoteWorkspaceMode != nil
             || snapshot.selectedTemplateID != nil
             || snapshot.collapsedSessionControllerPresentationIdentity != nil
             || snapshot.pendingMeetingDetection != nil
@@ -1187,6 +1212,7 @@ final class AppViewModel {
         selectedSidebarItem = snapshot.selectedSidebarItem ?? .upcoming
         selectedUpcomingEventID = snapshot.selectedUpcomingEventID
         selectedNoteID = snapshot.selectedNoteID
+        selectedNoteWorkspaceMode = snapshot.selectedNoteWorkspaceMode ?? .notes
         selectedTemplateID = snapshot.selectedTemplateID
         collapsedSessionControllerPresentationIdentity = snapshot.collapsedSessionControllerPresentationIdentity
         pendingMeetingDetection = snapshot.pendingMeetingDetection
@@ -1202,6 +1228,7 @@ final class AppViewModel {
                 selectedSidebarItem: selectedSidebarItem,
                 selectedUpcomingEventID: selectedUpcomingEventID,
                 selectedNoteID: selectedNoteID,
+                selectedNoteWorkspaceMode: selectedNoteWorkspaceMode,
                 selectedTemplateID: selectedTemplateID,
                 collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
                 pendingMeetingDetection: pendingMeetingDetection,

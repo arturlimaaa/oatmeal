@@ -7,6 +7,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
     var selectedSidebarItem: SidebarItem?
     var selectedUpcomingEventID: UUID?
     var selectedNoteID: UUID?
+    var selectedNoteWorkspaceMode: NoteWorkspaceMode?
     var selectedTemplateID: UUID?
     var collapsedSessionControllerPresentationIdentity: String?
     var pendingMeetingDetection: PendingMeetingDetection?
@@ -19,6 +20,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         selectedSidebarItem: SidebarItem? = nil,
         selectedUpcomingEventID: UUID? = nil,
         selectedNoteID: UUID? = nil,
+        selectedNoteWorkspaceMode: NoteWorkspaceMode? = nil,
         selectedTemplateID: UUID? = nil,
         collapsedSessionControllerPresentationIdentity: String? = nil,
         pendingMeetingDetection: PendingMeetingDetection? = nil,
@@ -30,6 +32,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         self.selectedSidebarItem = selectedSidebarItem
         self.selectedUpcomingEventID = selectedUpcomingEventID
         self.selectedNoteID = selectedNoteID
+        self.selectedNoteWorkspaceMode = selectedNoteWorkspaceMode
         self.selectedTemplateID = selectedTemplateID
         self.collapsedSessionControllerPresentationIdentity = collapsedSessionControllerPresentationIdentity
         self.pendingMeetingDetection = pendingMeetingDetection
@@ -45,6 +48,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         case selectedSidebarItem
         case selectedUpcomingEventID
         case selectedNoteID
+        case selectedNoteWorkspaceMode
         case selectedTemplateID
         case collapsedSessionControllerPresentationIdentity
         case pendingMeetingDetection
@@ -59,6 +63,10 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         selectedSidebarItem = try container.decodeIfPresent(SidebarItem.self, forKey: .selectedSidebarItem)
         selectedUpcomingEventID = try container.decodeIfPresent(UUID.self, forKey: .selectedUpcomingEventID)
         selectedNoteID = try container.decodeIfPresent(UUID.self, forKey: .selectedNoteID)
+        selectedNoteWorkspaceMode = try container.decodeIfPresent(
+            NoteWorkspaceMode.self,
+            forKey: .selectedNoteWorkspaceMode
+        )
         selectedTemplateID = try container.decodeIfPresent(UUID.self, forKey: .selectedTemplateID)
         collapsedSessionControllerPresentationIdentity = try container.decodeIfPresent(
             String.self,
@@ -88,6 +96,7 @@ struct AppPersistenceSnapshot: Codable, Equatable, Sendable {
         try container.encodeIfPresent(selectedSidebarItem, forKey: .selectedSidebarItem)
         try container.encodeIfPresent(selectedUpcomingEventID, forKey: .selectedUpcomingEventID)
         try container.encodeIfPresent(selectedNoteID, forKey: .selectedNoteID)
+        try container.encodeIfPresent(selectedNoteWorkspaceMode, forKey: .selectedNoteWorkspaceMode)
         try container.encodeIfPresent(selectedTemplateID, forKey: .selectedTemplateID)
         try container.encodeIfPresent(
             collapsedSessionControllerPresentationIdentity,
@@ -164,6 +173,7 @@ final class AppPersistence: @unchecked Sendable {
         selectedSidebarItem: SidebarItem,
         selectedUpcomingEventID: UUID?,
         selectedNoteID: UUID?,
+        selectedNoteWorkspaceMode: NoteWorkspaceMode,
         selectedTemplateID: UUID?,
         collapsedSessionControllerPresentationIdentity: String?,
         pendingMeetingDetection: PendingMeetingDetection?,
@@ -177,6 +187,7 @@ final class AppPersistence: @unchecked Sendable {
                 selectedSidebarItem: selectedSidebarItem,
                 selectedUpcomingEventID: selectedUpcomingEventID,
                 selectedNoteID: selectedNoteID,
+                selectedNoteWorkspaceMode: selectedNoteWorkspaceMode,
                 selectedTemplateID: selectedTemplateID,
                 collapsedSessionControllerPresentationIdentity: collapsedSessionControllerPresentationIdentity,
                 pendingMeetingDetection: pendingMeetingDetection,
