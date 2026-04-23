@@ -1,3 +1,4 @@
+import OatmealCore
 import SwiftUI
 
 enum OatmealSceneID {
@@ -345,123 +346,229 @@ private struct FloatingSessionControllerView: View {
         model.isSessionControllerCollapsed
     }
 
+    private var currentNote: MeetingNote? {
+        model.notes.first(where: { $0.id == state.noteID })
+    }
+
     let state: SessionControllerState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isCollapsed ? 12 : 14) {
-            header
-
+        VStack(alignment: .leading, spacing: isCollapsed ? 10 : 16) {
             if isCollapsed {
-                compactSummary
+                compactRecorderView
             } else {
-                expandedSummary
+                expandedMeetingView
             }
         }
-        .padding(16)
+        .padding(isCollapsed ? 14 : 18)
         .frame(
-            minWidth: isCollapsed ? 300 : 340,
-            idealWidth: isCollapsed ? 320 : 360,
-            maxWidth: isCollapsed ? 340 : 380
+            minWidth: isCollapsed ? 276 : 372,
+            idealWidth: isCollapsed ? 292 : 404,
+            maxWidth: isCollapsed ? 308 : 428
         )
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.regularMaterial)
+            RoundedRectangle(cornerRadius: isCollapsed ? 22 : 24, style: .continuous)
+                .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: isCollapsed ? 22 : 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(0.12), radius: 24, y: 14)
         .padding(8)
         .animation(.easeInOut(duration: 0.18), value: isCollapsed)
     }
 
-    private var header: some View {
+    private var compactRecorderView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                recorderPill
+
+                Spacer(minLength: 0)
+
+                elapsedChip
+
+                surfaceControlButton(
+                    systemImage: "rectangle.expand.vertical",
+                    accessibilityLabel: "Expand Recorder"
+                ) {
+                    model.toggleSessionControllerCollapsed()
+                }
+
+                surfaceControlButton(
+                    systemImage: "xmark",
+                    accessibilityLabel: "Dismiss Recorder"
+                ) {
+                    model.dismissSessionController()
+                    dismiss()
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(state.title)
+                    .font(.headline.weight(.semibold))
+                    .lineLimit(2)
+
+                Text(compactSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                if let firstSource = state.sourceStatuses.first {
+                    SessionControllerMiniBadge(
+                        title: firstSource.title,
+                        value: firstSource.label,
+                        tone: firstSource.tone
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                if state.canStopCapture {
+                    Button("Stop", role: .destructive) {
+                        Task {
+                            await router.stopCapture()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+
+                Button("Open") {
+                    _ = router.openMainWindow()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var expandedMeetingView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            expandedHeader
+            recorderStrip
+            endSuggestionCallout
+            scratchpadCard
+            transcriptPreviewCard
+
+            if state.showsProcessingIndicator {
+                processingRibbon
+            }
+
+            actionRail
+        }
+    }
+
+    private var expandedHeader: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Image(systemName: state.menuBarSymbolName)
-                        .foregroundStyle(color(for: state.tone))
-                    Text(state.title)
-                        .font(.headline)
-                        .lineLimit(2)
-                }
-
-                if let detailText = nonBlank(state.detailText) {
-                    Text(detailText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 8) {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    if let elapsedText = state.elapsedText() {
-                        Text(elapsedText)
-                            .font(.headline.monospacedDigit())
-                            .foregroundStyle(.primary)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        model.toggleSessionControllerCollapsed()
-                    } label: {
-                        Image(systemName: isCollapsed ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        model.dismissSessionController()
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private var expandedSummary: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            statusCallout
-            endSuggestionCallout
-            primaryBadges
-            sourceBadges
-
-            if state.showsProcessingIndicator {
-                Label(
-                    state.processingLabel ?? "Background processing is still running.",
-                    systemImage: "gearshape.2.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            actionRow
-        }
-    }
-
-    private var compactSummary: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            compactStatusHeader
-            endSuggestionCallout
-
-            compactBadgeStrip
-
-            if state.showsProcessingIndicator {
-                Text(state.processingLabel ?? "Finishing background work")
+                Text(state.menuBarSectionTitle.uppercased())
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .tracking(1.1)
+
+                Text(state.title)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
+
+                Text(expandedSubtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            compactActionRow
+            Spacer(minLength: 12)
+
+            VStack(alignment: .trailing, spacing: 10) {
+                elapsedChip
+
+                HStack(spacing: 8) {
+                    surfaceControlButton(
+                        systemImage: "rectangle.compress.vertical",
+                        accessibilityLabel: "Collapse Recorder"
+                    ) {
+                        model.toggleSessionControllerCollapsed()
+                    }
+
+                    surfaceControlButton(
+                        systemImage: "xmark",
+                        accessibilityLabel: "Dismiss Recorder"
+                    ) {
+                        model.dismissSessionController()
+                        dismiss()
+                    }
+                }
+            }
         }
+    }
+
+    private var recorderStrip: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(color(for: state.tone).opacity(0.14))
+                        .frame(width: 44, height: 44)
+
+                    Circle()
+                        .fill(color(for: state.tone))
+                        .frame(width: 12, height: 12)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(state.controllerStatusTitle)
+                        .font(.headline)
+
+                    if let detail = nonBlank(state.controllerStatusDetail) ?? nonBlank(state.detailText) {
+                        Text(detail)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let lifecycleText = state.lifecycleTimestampText() {
+                        Text(lifecycleText)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                SessionControllerMiniBadge(
+                    title: "Session",
+                    value: state.healthLabel,
+                    tone: state.tone
+                )
+
+                SessionControllerMiniBadge(
+                    title: "Capture",
+                    value: state.captureLabel,
+                    tone: state.kind == .processing ? .neutral : state.tone
+                )
+
+                ForEach(state.sourceStatuses) { source in
+                    SessionControllerMiniBadge(
+                        title: source.title,
+                        value: source.label,
+                        tone: source.tone
+                    )
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.42))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -469,14 +576,21 @@ private struct FloatingSessionControllerView: View {
         if let detectionState = model.menuBarMeetingDetectionState,
            detectionState.phase == .endSuggestion {
             VStack(alignment: .leading, spacing: 10) {
-                Label(detectionState.headline, systemImage: detectionState.symbolName)
-                    .font(.caption.weight(.semibold))
+                Text(detectionState.headline.uppercased())
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(.pink)
+                    .tracking(1.0)
 
-                Text(detectionState.detailText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: detectionState.symbolName)
+                        .foregroundStyle(.pink)
+                        .font(.headline)
+
+                    Text(detectionState.detailText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 HStack(spacing: 10) {
                     Button(detectionState.primaryActionTitle, role: .destructive) {
@@ -497,7 +611,7 @@ private struct FloatingSessionControllerView: View {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.pink.opacity(0.08))
+                    .fill(Color.pink.opacity(0.10))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -506,134 +620,66 @@ private struct FloatingSessionControllerView: View {
         }
     }
 
-    private var compactStatusHeader: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: state.controllerStatusSymbolName)
-                .font(.headline)
-                .foregroundStyle(color(for: state.tone))
+    private var scratchpadCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            labelRow(title: "Scratchpad", caption: scratchpadCaption)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.controllerStatusTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-
-                Text(state.compactStatusLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
-                if let lifecycleText = state.lifecycleTimestampText() {
-                    Text(lifecycleText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Text(scratchpadPreview)
+                .font(.callout)
+                .foregroundStyle(nonBlank(currentNote?.rawNotes) == nil ? .secondary : .primary)
+                .lineLimit(6)
+                .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    private var statusCallout: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: state.controllerStatusSymbolName)
-                .font(.title3)
-                .foregroundStyle(color(for: state.tone))
-                .frame(width: 28, height: 28)
-                .background(color(for: state.tone).opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.controllerStatusTitle)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-
-                if let detailText = nonBlank(state.controllerStatusDetail) {
-                    Text(detailText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if let lifecycleText = state.lifecycleTimestampText() {
-                    Text(lifecycleText)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(color(for: state.tone).opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(color(for: state.tone).opacity(0.18), lineWidth: 1)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.36))
         )
     }
 
-    private var primaryBadges: some View {
-        HStack(spacing: 8) {
-            SessionControllerBadge(
-                title: "Session",
-                value: state.healthLabel,
-                tone: state.tone
-            )
+    private var transcriptPreviewCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            labelRow(title: "Transcript Preview", caption: transcriptCaption)
 
-            SessionControllerBadge(
-                title: "Capture",
-                value: state.captureLabel,
-                tone: state.kind == .processing ? .neutral : state.tone
-            )
-        }
-    }
-
-    private var sourceBadges: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(state.sourceStatuses) { source in
-                HStack(spacing: 8) {
-                    SessionControllerBadge(
-                        title: source.title,
-                        value: source.label,
-                        tone: source.tone
-                    )
-
-                    if let detailText = nonBlank(source.detailText) {
-                        Text(detailText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+            if transcriptPreviewLines.isEmpty {
+                Text(transcriptEmptyState)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(transcriptPreviewLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.vertical, 2)
                     }
                 }
             }
         }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.36))
+        )
     }
 
-    private var compactBadgeStrip: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                SessionControllerBadge(
-                    title: "Session",
-                    value: state.healthLabel,
-                    tone: state.tone
-                )
+    private var processingRibbon: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles.rectangle.stack.fill")
+                .foregroundStyle(.secondary)
 
-                SessionControllerBadge(
-                    title: "Capture",
-                    value: state.captureLabel,
-                    tone: state.kind == .processing ? .neutral : state.tone
-                )
-            }
-
-            HStack(spacing: 8) {
-                ForEach(state.sourceStatuses) { source in
-                    SessionControllerMiniBadge(
-                        title: source.title,
-                        value: source.label,
-                        tone: source.tone
-                    )
-                }
-            }
+            Text(state.processingLabel ?? "Oatmeal is finishing the meeting note in the background.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.36), in: Capsule())
     }
 
-    private var actionRow: some View {
+    private var actionRail: some View {
         HStack(spacing: 10) {
             if state.canStopCapture {
                 Button("Stop Capture", role: .destructive) {
@@ -644,13 +690,13 @@ private struct FloatingSessionControllerView: View {
                 .buttonStyle(.borderedProminent)
             }
 
-            Button(state.primaryActionTitle) {
+            Button("Open Note") {
                 _ = router.openMainWindow()
             }
             .buttonStyle(.bordered)
 
             if state.canOpenTranscript {
-                Button(state.transcriptActionTitle) {
+                Button("Transcript") {
                     _ = router.openMainWindow(openTranscript: true)
                 }
                 .buttonStyle(.bordered)
@@ -660,46 +706,154 @@ private struct FloatingSessionControllerView: View {
         }
     }
 
-    private var compactActionRow: some View {
-        HStack(spacing: 8) {
-            if state.canStopCapture {
-                Button("Stop", role: .destructive) {
-                    Task {
-                        await router.stopCapture()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-
-            Button("Open") {
-                _ = router.openMainWindow()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-
-            if state.canOpenTranscript {
-                Button(state.transcriptActionTitle) {
-                    _ = router.openMainWindow(openTranscript: true)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            Spacer()
+    private var compactSubtitle: String {
+        if state.kind == .processing {
+            return state.processingLabel ?? expandedSubtitle
         }
+        return expandedSubtitle
+    }
+
+    private var expandedSubtitle: String {
+        if let detail = nonBlank(state.detailText) {
+            return detail
+        }
+
+        let sourceSummary = state.sourceStatuses
+            .map { "\($0.title) \($0.label.lowercased())" }
+            .joined(separator: " • ")
+
+        if !sourceSummary.isEmpty {
+            return sourceSummary
+        }
+
+        return state.menuBarSummary
+    }
+
+    private var scratchpadPreview: String {
+        if let rawNotes = nonBlank(currentNote?.rawNotes) {
+            return rawNotes
+        }
+
+        if state.canStopCapture {
+            return "Use the main note window for longer notes. Oatmeal keeps this recorder small so you can stay in the meeting."
+        }
+
+        return "No scratchpad text yet. Open the full note if you want to add more context while Oatmeal finishes processing."
+    }
+
+    private var scratchpadCaption: String {
+        nonBlank(currentNote?.rawNotes) == nil
+            ? "Lightweight notes stay attached to this meeting."
+            : "Raw notes from this meeting stay visible here."
+    }
+
+    private var transcriptPreviewLines: [String] {
+        guard let note = currentNote else {
+            return []
+        }
+
+        let liveLines = note.liveSessionState.previewEntries
+            .suffix(3)
+            .map(\.text)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        if !liveLines.isEmpty {
+            return liveLines
+        }
+
+        return note.transcriptSegments
+            .suffix(3)
+            .map(\.text)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private var transcriptCaption: String {
+        state.canOpenTranscript
+            ? "A quick look at what Oatmeal is hearing."
+            : "Live transcript snippets will show up here while recording."
+    }
+
+    private var transcriptEmptyState: String {
+        if state.kind == .processing {
+            return "Oatmeal is reconciling the final transcript from the saved recording."
+        }
+
+        return "Transcript updates will appear here as Oatmeal catches up."
+    }
+
+    private var recorderPill: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color(for: state.tone))
+                .frame(width: 8, height: 8)
+            Text(recorderPillText)
+                .font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(color(for: state.tone).opacity(0.12), in: Capsule())
+    }
+
+    private var recorderPillText: String {
+        switch state.kind {
+        case .active:
+            return state.controllerStatusTitle
+        case .processing:
+            return "Wrapping up"
+        case .recent:
+            return "Ready"
+        }
+    }
+
+    private var elapsedChip: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            Text(state.elapsedText() ?? "--:--")
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.34), in: Capsule())
+        }
+    }
+
+    private func labelRow(title: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .tracking(1.0)
+
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func surfaceControlButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.caption.weight(.semibold))
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(0.34), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private func color(for tone: SessionControllerState.Tone) -> Color {
         switch tone {
         case .live:
-            .red
+            Color(red: 0.84, green: 0.24, blue: 0.19)
         case .delayed:
-            .orange
+            Color(red: 0.86, green: 0.55, blue: 0.17)
         case .recovered:
-            .blue
+            Color(red: 0.22, green: 0.46, blue: 0.82)
         case .failed:
-            .pink
+            Color(red: 0.78, green: 0.25, blue: 0.41)
         case .neutral:
             .secondary
         }
@@ -724,35 +878,43 @@ private struct FloatingMeetingDetectionPromptView: View {
     let state: MeetingDetectionPromptState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             header
             detail
-            badges
             candidateChooser
             actions
         }
         .padding(16)
-        .frame(minWidth: 320, idealWidth: 340, maxWidth: 360)
+        .frame(minWidth: 300, idealWidth: 324, maxWidth: 340)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.regularMaterial)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(0.12), radius: 24, y: 14)
         .padding(8)
     }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: state.symbolName)
-                .foregroundStyle(.orange)
-                .font(.title3)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.orange.opacity(0.14))
+                    .frame(width: 38, height: 38)
+
+                Image(systemName: state.symbolName)
+                    .foregroundStyle(.orange)
+                    .font(.headline)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(state.headline)
-                    .font(.headline)
+                Text(state.headline.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .tracking(1.0)
                 Text(state.title)
                     .font(.title3.weight(.semibold))
                     .lineLimit(2)
@@ -763,20 +925,17 @@ private struct FloatingMeetingDetectionPromptView: View {
     }
 
     private var detail: some View {
-        Text(state.detailText)
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var badges: some View {
-        HStack(spacing: 8) {
-            SessionControllerBadge(title: "Source", value: state.sourceName, tone: .delayed)
-            SessionControllerBadge(
-                title: state.phase == .endSuggestion ? "Action" : "Ready",
-                value: badgeValue,
-                tone: badgeTone
+        VStack(alignment: .leading, spacing: 8) {
+            SessionControllerMiniBadge(
+                title: "Source",
+                value: state.sourceName,
+                tone: state.phase == .endSuggestion ? .failed : .delayed
             )
+
+            Text(state.detailText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -784,7 +943,7 @@ private struct FloatingMeetingDetectionPromptView: View {
     private var candidateChooser: some View {
         if !state.candidateOptions.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Calendar match")
+                Text("Choose the meeting")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
@@ -814,22 +973,6 @@ private struct FloatingMeetingDetectionPromptView: View {
         }
     }
 
-    private var badgeValue: String {
-        if state.phase == .endSuggestion {
-            return state.kind == .prompt ? "Stop hint" : "Passive hint"
-        }
-
-        return state.candidateOptions.isEmpty ? "Start flow" : "Choose meeting"
-    }
-
-    private var badgeTone: SessionControllerState.Tone {
-        if state.phase == .endSuggestion {
-            return .failed
-        }
-
-        return state.candidateOptions.isEmpty ? .live : .recovered
-    }
-
     private func candidateButton(_ option: MeetingDetectionCandidateOption) -> some View {
         let isSelected = state.selectedCandidateID == option.id
 
@@ -856,20 +999,12 @@ private struct FloatingMeetingDetectionPromptView: View {
             }
             .padding(10)
             .background(candidateBackgroundColor(isSelected), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(candidateBorderColor(isSelected), lineWidth: 1)
-            )
         }
         .buttonStyle(.plain)
     }
 
     private func candidateBackgroundColor(_ isSelected: Bool) -> Color {
-        isSelected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08)
-    }
-
-    private func candidateBorderColor(_ isSelected: Bool) -> Color {
-        isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.16)
+        isSelected ? Color.accentColor.opacity(0.14) : Color.white.opacity(0.36)
     }
 }
 
@@ -889,23 +1024,19 @@ private struct SessionControllerBadge: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(color.opacity(0.25), lineWidth: 1)
-        )
+        .background(color.opacity(0.12), in: Capsule())
     }
 
     private var color: Color {
         switch tone {
         case .live:
-            .red
+            Color(red: 0.84, green: 0.24, blue: 0.19)
         case .delayed:
-            .orange
+            Color(red: 0.86, green: 0.55, blue: 0.17)
         case .recovered:
-            .blue
+            Color(red: 0.22, green: 0.46, blue: 0.82)
         case .failed:
-            .pink
+            Color(red: 0.78, green: 0.25, blue: 0.41)
         case .neutral:
             .secondary
         }
@@ -930,19 +1061,18 @@ private struct SessionControllerMiniBadge: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(color.opacity(0.12), in: Capsule())
-        .overlay(Capsule().stroke(color.opacity(0.25), lineWidth: 1))
     }
 
     private var color: Color {
         switch tone {
         case .live:
-            .red
+            Color(red: 0.84, green: 0.24, blue: 0.19)
         case .delayed:
-            .orange
+            Color(red: 0.86, green: 0.55, blue: 0.17)
         case .recovered:
-            .blue
+            Color(red: 0.22, green: 0.46, blue: 0.82)
         case .failed:
-            .pink
+            Color(red: 0.78, green: 0.25, blue: 0.41)
         case .neutral:
             .secondary
         }
