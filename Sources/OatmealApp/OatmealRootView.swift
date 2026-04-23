@@ -25,8 +25,10 @@ struct OatmealRootView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
+                .navigationSplitViewColumnWidth(min: 224, ideal: 248, max: 276)
         } content: {
             contentColumn
+                .navigationSplitViewColumnWidth(min: 320, ideal: 360, max: 420)
         } detail: {
             detailColumn
         }
@@ -81,27 +83,90 @@ struct OatmealRootView: View {
     }
 
     private var sidebar: some View {
-        List(selection: selectedSidebarItemBinding) {
-            Section("Workspace") {
-                Label("Upcoming", systemImage: "calendar")
-                    .tag(SidebarItem.upcoming)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Oatmeal")
+                        .font(.system(size: 26, weight: .semibold, design: .rounded))
 
-                Label("All Notes", systemImage: "note.text")
-                    .tag(SidebarItem.allNotes)
+                    Text("Local-first meeting workspace")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
 
-                Label("Templates", systemImage: "square.and.pencil")
-                    .tag(SidebarItem.templates)
-            }
+                    HStack(spacing: 8) {
+                        LibraryMetricPill(
+                            title: "\(model.notes.count)",
+                            systemImage: "note.text"
+                        )
+                        LibraryMetricPill(
+                            title: "\(model.upcomingMeetings.count)",
+                            systemImage: "calendar"
+                        )
+                    }
+                }
 
-            Section("Folders") {
-                ForEach(model.folders) { folder in
-                    FolderLabel(folder: folder)
-                        .tag(SidebarItem.folder(folder.id))
+                SidebarSection(title: "Workspace", subtitle: "Your notes and next meetings") {
+                    SidebarDestinationButton(
+                        title: "Upcoming",
+                        subtitle: model.upcomingMeetings.isEmpty ? "Next seven days" : "\(model.upcomingMeetings.count) meetings in the next 7 days",
+                        systemImage: "calendar",
+                        badge: model.upcomingMeetings.isEmpty ? nil : "\(model.upcomingMeetings.count)",
+                        isSelected: model.selectedSidebarItem == .upcoming
+                    ) {
+                        model.setSelectedSidebarItem(.upcoming)
+                    }
+
+                    SidebarDestinationButton(
+                        title: "All Notes",
+                        subtitle: model.notes.isEmpty ? "Meeting library" : "\(model.notes.count) captured meetings",
+                        systemImage: "note.text",
+                        badge: model.notes.isEmpty ? nil : "\(model.notes.count)",
+                        isSelected: model.selectedSidebarItem == .allNotes
+                    ) {
+                        model.setSelectedSidebarItem(.allNotes)
+                    }
+
+                    SidebarDestinationButton(
+                        title: "Templates",
+                        subtitle: "Reusable output formats",
+                        systemImage: "square.and.pencil",
+                        badge: model.templates.isEmpty ? nil : "\(model.templates.count)",
+                        isSelected: model.selectedSidebarItem == .templates
+                    ) {
+                        model.setSelectedSidebarItem(.templates)
+                    }
+                }
+
+                if !model.folders.isEmpty {
+                    SidebarSection(title: "Folders", subtitle: "Pinned context and collections") {
+                        ForEach(model.folders) { folder in
+                            SidebarDestinationButton(
+                                title: folder.name,
+                                subtitle: folderSubtitle(for: folder),
+                                systemImage: folder.isPinned ? "star.square.on.square" : "folder",
+                                badge: noteCountText(for: folder),
+                                isSelected: model.selectedSidebarItem == .folder(folder.id)
+                            ) {
+                                model.setSelectedSidebarItem(.folder(folder.id))
+                            }
+                        }
+                    }
                 }
             }
         }
-        .navigationTitle("Oatmeal")
-        .listStyle(.sidebar)
+        .scrollIndicators(.hidden)
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(nsColor: .windowBackgroundColor),
+                    Color(nsColor: .underPageBackgroundColor)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
     @ViewBuilder
@@ -195,76 +260,122 @@ struct OatmealRootView: View {
     }
 
     private var upcomingList: some View {
-        List(model.filteredUpcomingMeetings, selection: selectedUpcomingEventIDBinding) { event in
-            UpcomingMeetingRow(event: event, existingNote: model.note(for: event))
-                .tag(event.id)
-        }
-        .navigationTitle("Upcoming Meetings")
-        .overlay {
+        WorkspaceColumnSurface(
+            eyebrow: "Schedule",
+            title: "Upcoming Meetings",
+            subtitle: upcomingSubtitle,
+            accessory: {
+                LibraryMetricPill(
+                    title: model.calendarAccessStatus == .granted ? "\(model.filteredUpcomingMeetings.count)" : "Calendar",
+                    systemImage: model.calendarAccessStatus == .granted ? "calendar" : "calendar.badge.exclamationmark"
+                )
+            }
+        ) {
             if model.calendarAccessStatus != .granted {
-                ContentUnavailableView(
-                    "Calendar Access Needed",
-                    systemImage: "calendar.badge.plus",
-                    description: Text("Grant calendar access to see real meetings from your Mac.")
+                ColumnEmptyState(
+                    title: "Calendar Access Needed",
+                    message: "Grant calendar access to see real meetings from your Mac.",
+                    systemImage: "calendar.badge.plus"
                 )
             } else if model.isLoadingUpcomingMeetings {
-                ProgressView("Loading meetings…")
+                ColumnLoadingState(title: "Loading meetings…")
             } else if model.filteredUpcomingMeetings.isEmpty {
-                ContentUnavailableView(
-                    "No Upcoming Meetings",
-                    systemImage: "calendar",
-                    description: Text("Nothing in the next seven days matches the current filter.")
+                ColumnEmptyState(
+                    title: "No Upcoming Meetings",
+                    message: "Nothing in the next seven days matches the current filter.",
+                    systemImage: "calendar"
                 )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(model.filteredUpcomingMeetings) { event in
+                            Button {
+                                model.setSelectedUpcomingEventID(event.id)
+                            } label: {
+                                UpcomingMeetingRow(
+                                    event: event,
+                                    existingNote: model.note(for: event),
+                                    isSelected: model.selectedUpcomingEventID == event.id
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(6)
+                }
             }
         }
     }
 
     private var noteList: some View {
-        List(model.filteredNotes, selection: selectedNoteIDBinding) { note in
-            NoteRow(note: note, folder: model.folder(for: note))
-                .tag(note.id)
-        }
-        .navigationTitle(listTitle)
-        .overlay {
-            if model.filteredNotes.isEmpty {
-                ContentUnavailableView(
-                    "No Notes",
-                    systemImage: "tray",
-                    description: Text("Nothing matches the current filter yet.")
+        WorkspaceColumnSurface(
+            eyebrow: noteColumnEyebrow,
+            title: listTitle,
+            subtitle: noteListSubtitle,
+            accessory: {
+                LibraryMetricPill(
+                    title: "\(model.filteredNotes.count)",
+                    systemImage: "line.3.horizontal.decrease.circle"
                 )
+            }
+        ) {
+            if model.filteredNotes.isEmpty {
+                ColumnEmptyState(
+                    title: "No Notes",
+                    message: "Nothing matches the current filter yet.",
+                    systemImage: "tray"
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(model.filteredNotes) { note in
+                            Button {
+                                model.setSelectedNoteID(note.id)
+                            } label: {
+                                NoteRow(
+                                    note: note,
+                                    folder: model.folder(for: note),
+                                    isSelected: model.selectedNoteID == note.id
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(6)
+                }
             }
         }
     }
 
     private var templateList: some View {
-        List(model.templates, selection: selectedTemplateIDBinding) { template in
-            Button {
-                model.setSelectedTemplate(template)
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(template.name)
-                            .font(.headline)
-                        if template.isDefault {
-                            Text("Default")
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.blue.opacity(0.12), in: Capsule())
-                                .foregroundStyle(.blue)
-                        }
-                    }
-
-                    Text(template.description)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .padding(.vertical, 4)
+        WorkspaceColumnSurface(
+            eyebrow: "Library",
+            title: "Templates",
+            subtitle: "Reusable structures for polished meeting notes.",
+            accessory: {
+                LibraryMetricPill(
+                    title: "\(model.templates.count)",
+                    systemImage: "square.and.pencil"
+                )
             }
-            .buttonStyle(.plain)
-            .tag(template.id)
+        ) {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(model.templates) { template in
+                        Button {
+                            model.setSelectedTemplate(template)
+                        } label: {
+                            TemplateListRow(
+                                template: template,
+                                isSelected: model.selectedTemplateID == template.id
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(6)
+            }
         }
-        .navigationTitle("Templates")
     }
 
     private var listTitle: String {
@@ -313,76 +424,122 @@ struct OatmealRootView: View {
         )
     }
 
-    private var selectedSidebarItemBinding: Binding<SidebarItem?> {
-        Binding(
-            get: { model.selectedSidebarItem },
-            set: { model.setSelectedSidebarItem($0 ?? .allNotes) }
-        )
+    private var noteColumnEyebrow: String {
+        switch model.selectedSidebarItem {
+        case .allNotes:
+            "Library"
+        case .templates:
+            "Library"
+        case .upcoming:
+            "Schedule"
+        case .folder:
+            "Folder"
+        }
     }
 
-    private var selectedUpcomingEventIDBinding: Binding<CalendarEvent.ID?> {
-        Binding(
-            get: { model.selectedUpcomingEventID },
-            set: { model.setSelectedUpcomingEventID($0) }
-        )
+    private var noteListSubtitle: String {
+        let trimmedQuery = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch model.selectedSidebarItem {
+        case .allNotes:
+            if trimmedQuery.isEmpty {
+                return "Recent conversations, polished notes, and in-flight meetings."
+            }
+            return "Showing \(model.filteredNotes.count) notes that match \"\(trimmedQuery)\"."
+        case let .folder(folderID):
+            let folderName = model.folders.first(where: { $0.id == folderID })?.name ?? "this folder"
+            if trimmedQuery.isEmpty {
+                return "Focused notes collected in \(folderName)."
+            }
+            return "Showing \(model.filteredNotes.count) notes from \(folderName) that match \"\(trimmedQuery)\"."
+        case .templates:
+            return "Reusable structures for polished meeting notes."
+        case .upcoming:
+            return "The next seven days from your connected calendars."
+        }
     }
 
-    private var selectedNoteIDBinding: Binding<MeetingNote.ID?> {
-        Binding(
-            get: { model.selectedNoteID },
-            set: { model.setSelectedNoteID($0) }
-        )
+    private var upcomingSubtitle: String {
+        let trimmedQuery = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedQuery.isEmpty {
+            return "The next seven days from your connected calendars."
+        }
+        return "Showing \(model.filteredUpcomingMeetings.count) meetings that match \"\(trimmedQuery)\"."
     }
 
-    private var selectedTemplateIDBinding: Binding<NoteTemplate.ID?> {
-        Binding(
-            get: { model.selectedTemplateID },
-            set: { model.setSelectedTemplateID($0) }
-        )
+    private func folderSubtitle(for folder: NoteFolder) -> String {
+        let count = model.notes.filter { $0.folderID == folder.id }.count
+        if folder.isPinned {
+            return count == 1 ? "Pinned · 1 note" : "Pinned · \(count) notes"
+        }
+        return count == 1 ? "1 note" : "\(count) notes"
+    }
+
+    private func noteCountText(for folder: NoteFolder) -> String? {
+        let count = model.notes.filter { $0.folderID == folder.id }.count
+        return count == 0 ? nil : "\(count)"
     }
 }
 
 private struct NoteRow: View {
     let note: MeetingNote
     let folder: NoteFolder?
+    let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top) {
-                Text(note.title)
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(note.title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
 
-                Spacer()
+                    Text(note.enhancedNote?.summary ?? note.rawNotes.nilIfBlank ?? "Ready to capture notes")
+                        .lineLimit(2)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
 
-                Text(noteDisplayStatus)
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(statusColor.opacity(0.14), in: Capsule())
-                    .foregroundStyle(statusColor)
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(relativeTimestamp)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    StatusPill(
+                        title: noteDisplayStatus,
+                        systemImage: noteStatusSymbolName,
+                        tint: statusColor
+                    )
+                }
             }
 
-            Text(note.enhancedNote?.summary ?? note.rawNotes.nilIfBlank ?? "Ready to capture notes")
-                .lineLimit(2)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 10) {
-                Text(note.calendarEvent.map(eventLabel) ?? note.createdAt.formatted(date: .abbreviated, time: .shortened))
-
+            HStack(spacing: 8) {
+                MetadataPill(
+                    title: note.calendarEvent == nil ? "Quick note" : "Meeting",
+                    systemImage: note.calendarEvent == nil ? "bolt.circle" : "calendar"
+                )
                 if let folder {
-                    Text(folder.name)
+                    MetadataPill(title: folder.name, systemImage: "folder")
                 }
-
-                let attendees = note.calendarEvent?.attendees.map(\.name).joined(separator: ", ")
-                if let attendees, !attendees.isEmpty {
-                    Text(attendees)
-                        .lineLimit(1)
+                if let attendeeContext {
+                    MetadataPill(title: attendeeContext, systemImage: "person.2")
+                }
+                if let meetingContext {
+                    MetadataPill(title: meetingContext, systemImage: "clock")
                 }
             }
-            .font(.caption)
-            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, 4)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(rowBorder, lineWidth: isSelected ? 1.4 : 1)
+        )
     }
 
     private var noteDisplayStatus: String {
@@ -452,50 +609,400 @@ private struct NoteRow: View {
         }
     }
 
-    private func eventLabel(_ event: CalendarEvent) -> String {
-        event.startDate.formatted(date: .abbreviated, time: .shortened)
+    private var noteStatusSymbolName: String {
+        switch note.captureState.phase {
+        case .capturing:
+            return "record.circle.fill"
+        case .paused:
+            return "pause.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .complete:
+            switch note.processingState.status {
+            case .queued, .running:
+                return "arrow.triangle.2.circlepath.circle.fill"
+            case .failed:
+                return "exclamationmark.triangle.fill"
+            case .completed:
+                return "checkmark.circle.fill"
+            case .idle:
+                return note.generationStatus == .succeeded ? "checkmark.circle.fill" : "circle.fill"
+            }
+        case .ready:
+            return "circle.fill"
+        }
+    }
+
+    private var relativeTimestamp: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: note.updatedAt, relativeTo: Date())
+    }
+
+    private var attendeeContext: String? {
+        guard let attendees = note.calendarEvent?.attendees, !attendees.isEmpty else {
+            return nil
+        }
+        if attendees.count == 1 {
+            return attendees[0].name
+        }
+        return "\(attendees[0].name) +\(attendees.count - 1)"
+    }
+
+    private var meetingContext: String? {
+        guard let event = note.calendarEvent else {
+            return note.createdAt.formatted(date: .abbreviated, time: .shortened)
+        }
+        return event.startDate.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var rowBackground: some ShapeStyle {
+        if isSelected {
+            return AnyShapeStyle(Color.accentColor.opacity(0.10))
+        }
+        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+    }
+
+    private var rowBorder: Color {
+        isSelected ? .accentColor.opacity(0.32) : Color.primary.opacity(0.06)
     }
 }
 
 private struct UpcomingMeetingRow: View {
     let event: CalendarEvent
     let existingNote: MeetingNote?
+    let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(startLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(event.title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    if let contextLine {
+                        Text(contextLine)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(relativeStartLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if existingNote != nil {
+                        StatusPill(title: "Note Ready", systemImage: "checkmark.circle.fill", tint: .green)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                MetadataPill(title: timeRangeLabel, systemImage: "clock")
+                if let location = event.location?.nilIfBlank {
+                    MetadataPill(title: location, systemImage: "mappin")
+                }
+                if !event.attendees.isEmpty {
+                    MetadataPill(title: attendeeLabel, systemImage: "person.2")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(rowBorder, lineWidth: isSelected ? 1.4 : 1)
+        )
+    }
+
+    private var relativeStartLabel: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: event.startDate, relativeTo: Date())
+    }
+
+    private var startLabel: String {
+        event.startDate.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var timeRangeLabel: String {
+        "\(event.startDate.formatted(date: .omitted, time: .shortened))–\(event.endDate.formatted(date: .omitted, time: .shortened))"
+    }
+
+    private var attendeeLabel: String {
+        if event.attendees.count == 1 {
+            return event.attendees[0].name
+        }
+        return "\(event.attendees[0].name) +\(event.attendees.count - 1)"
+    }
+
+    private var contextLine: String? {
+        let pieces = [
+            event.location?.nilIfBlank,
+            event.attendees.isEmpty ? nil : attendeeLabel
+        ].compactMap { $0 }
+        return pieces.isEmpty ? nil : pieces.joined(separator: " · ")
+    }
+
+    private var rowBackground: some ShapeStyle {
+        if isSelected {
+            return AnyShapeStyle(Color.accentColor.opacity(0.10))
+        }
+        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+    }
+
+    private var rowBorder: Color {
+        isSelected ? .accentColor.opacity(0.32) : Color.primary.opacity(0.06)
+    }
+}
+
+private struct TemplateListRow: View {
+    let template: NoteTemplate
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
-                Text(event.title)
-                    .font(.headline)
+                Text(template.name)
+                    .font(.headline.weight(.semibold))
 
                 Spacer()
 
-                if existingNote != nil {
-                    Text("Note Ready")
+                if template.isDefault {
+                    StatusPill(title: "Default", systemImage: "sparkles", tint: .blue)
+                }
+            }
+
+            Text(template.description)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isSelected ? Color.accentColor.opacity(0.10) : Color(nsColor: .controlBackgroundColor).opacity(0.58),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(isSelected ? Color.accentColor.opacity(0.32) : Color.primary.opacity(0.06), lineWidth: isSelected ? 1.4 : 1)
+        )
+    }
+}
+
+private struct WorkspaceColumnSurface<Accessory: View, Content: View>: View {
+    let eyebrow: String
+    let title: String
+    let subtitle: String
+    @ViewBuilder let accessory: Accessory
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(eyebrow.uppercased())
                         .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.green.opacity(0.14), in: Capsule())
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.secondary)
+
+                    Text(title)
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+
+                    Text(subtitle)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
+
+                Spacer(minLength: 12)
+
+                accessory
             }
 
-            HStack(spacing: 10) {
-                Text(event.startDate.formatted(date: .abbreviated, time: .shortened))
-                if let location = event.location?.nilIfBlank {
-                    Text(location)
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.thinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+        .padding(18)
+        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+}
 
-            if !event.attendees.isEmpty {
-                Text(event.attendees.map(\.name).joined(separator: ", "))
+private struct SidebarSection<Content: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 8) {
+                content
             }
         }
-        .padding(.vertical, 4)
+    }
+}
+
+private struct SidebarDestinationButton: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let badge: String?
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(width: 18, height: 18)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 8)
+
+                if let badge {
+                    Text(badge)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.10) : Color(nsColor: .controlBackgroundColor).opacity(0.45))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.28) : Color.primary.opacity(0.05), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct LibraryMetricPill: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.65), in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(Color.primary.opacity(0.05), lineWidth: 1)
+            )
+    }
+}
+
+private struct StatusPill: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(tint.opacity(0.12), in: Capsule())
+    }
+}
+
+private struct MetadataPill: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.045), in: Capsule())
+    }
+}
+
+private struct ColumnEmptyState: View {
+    let title: String
+    let message: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Text(title)
+                .font(.headline)
+
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+}
+
+private struct ColumnLoadingState: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+            Text(title)
+                .foregroundStyle(.secondary)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 }
 
