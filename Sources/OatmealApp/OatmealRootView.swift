@@ -1170,6 +1170,7 @@ private struct MeetingDetailView: View {
     let retryTranscription: () -> Void
     let retryGeneration: () -> Void
     @State private var isLiveTranscriptPanelExpanded = false
+    @State private var isTechnicalDetailsPresented = false
     @State private var assistantPrompt = ""
     @State private var highlightedTranscriptSegmentID: UUID?
     @State private var transcriptScrollRequest = 0
@@ -1210,6 +1211,13 @@ private struct MeetingDetailView: View {
         )
     }
 
+    private var premiumTechnicalDetailsState: PremiumTechnicalDetailsState {
+        PremiumTechnicalDetailsState.make(
+            note: note,
+            selectedMode: resolvedWorkspaceState.selectedMode
+        )
+    }
+
     private var resolvedWorkspaceState: NoteWorkspacePresentationState {
         workspaceState ?? NoteWorkspacePresentationState.make(
             note: note,
@@ -1239,6 +1247,9 @@ private struct MeetingDetailView: View {
                 }
             }
             .background(workspaceBackground)
+            .sheet(isPresented: $isTechnicalDetailsPresented) {
+                technicalDetailsSheet
+            }
             .onAppear {
                 isLiveTranscriptPanelExpanded = isLiveTranscriptPanelPresented
             }
@@ -1303,6 +1314,14 @@ private struct MeetingDetailView: View {
 
                     Label(captureLabel, systemImage: "waveform")
                         .foregroundStyle(statusColor)
+
+                    Button {
+                        isTechnicalDetailsPresented = true
+                    } label: {
+                        Label("Technical Details", systemImage: "slider.horizontal.3")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 
@@ -1442,34 +1461,53 @@ private struct MeetingDetailView: View {
             if note.rawNotes.nilIfBlank != nil {
                 workingNotesSection
             }
+        }
+    }
 
-            DisclosureGroup {
+    private var technicalDetailsSheet: some View {
+        NavigationStack {
+            ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    PremiumWorkspacePanel(
+                        eyebrow: "Behind the scenes",
+                        title: premiumTechnicalDetailsState.title,
+                        subtitle: premiumTechnicalDetailsState.subtitle,
+                        tint: premiumTechnicalDetailsState.tone.tintColor
+                    ) {
+                        HStack(spacing: 10) {
+                            WorkspaceHeroBadge(
+                                title: "Status",
+                                value: premiumTechnicalDetailsState.statusBadgeText,
+                                color: premiumTechnicalDetailsState.tone.tintColor
+                            )
+                            WorkspaceHeroBadge(
+                                title: "Context",
+                                value: premiumTechnicalDetailsState.routeBadgeText,
+                                color: .secondary
+                            )
+                        }
+                    }
+
                     metadataSection
-                    captureSection
                     processingSection
+                    captureSection
                     transcriptionSection
                     summaryRuntimeSection
                 }
-                .padding(.top, 16)
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Meeting Details & Diagnostics")
-                        .font(.headline)
-                    Text("Capture, runtime, and recovery details stay available here without taking over the note.")
-                        .foregroundStyle(.secondary)
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .background(workspaceBackground)
+            .navigationTitle("Technical Details")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        isTechnicalDetailsPresented = false
+                    }
                 }
             }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.08))
-            )
         }
+        .frame(minWidth: 720, minHeight: 640)
     }
 
     private var transcriptWorkspace: some View {
@@ -1768,7 +1806,7 @@ private struct MeetingDetailView: View {
     }
 
     private var metadataSection: some View {
-        DetailCard(title: "Meeting Context") {
+        DetailCard(title: "Meeting Context & Status") {
             VStack(alignment: .leading, spacing: 10) {
                 LabeledContent("Origin", value: note.isQuickNote ? "Quick Note" : "Calendar Event")
                 LabeledContent("Template", value: template?.name ?? "Automatic")
@@ -2206,7 +2244,7 @@ private struct MeetingDetailView: View {
     }
 
     private var captureSection: some View {
-        DetailCard(title: "Capture Readiness") {
+        DetailCard(title: "Capture & Permissions") {
             VStack(alignment: .leading, spacing: 12) {
                 PermissionLine(name: "Microphone", status: capturePermissions.microphone, required: true)
                 PermissionLine(name: "System Audio", status: capturePermissions.systemAudio, required: note.calendarEvent != nil)
@@ -2240,7 +2278,7 @@ private struct MeetingDetailView: View {
     }
 
     private var transcriptionSection: some View {
-        DetailCard(title: "Transcription Runtime") {
+        DetailCard(title: "Transcript Engine") {
             VStack(alignment: .leading, spacing: 12) {
                 LabeledContent("Preferred backend", value: transcriptionConfiguration.preferredBackend.displayName)
                 LabeledContent("Execution policy", value: transcriptionConfiguration.executionPolicy.displayName)
@@ -2270,7 +2308,7 @@ private struct MeetingDetailView: View {
     }
 
     private var processingSection: some View {
-        DetailCard(title: "Processing") {
+        DetailCard(title: "Behind-the-Scenes Progress") {
             let rows = processingRows
 
             VStack(alignment: .leading, spacing: 12) {
@@ -2309,7 +2347,7 @@ private struct MeetingDetailView: View {
     }
 
     private var summaryRuntimeSection: some View {
-        DetailCard(title: "Summary Runtime") {
+        DetailCard(title: "Summary Engine") {
             VStack(alignment: .leading, spacing: 12) {
                 LabeledContent("Preferred backend", value: summaryConfiguration.preferredBackend.displayName)
                 LabeledContent("Execution policy", value: summaryConfiguration.executionPolicy.displayName)
