@@ -1203,6 +1203,13 @@ private struct MeetingDetailView: View {
         )
     }
 
+    private var premiumAIWorkspaceState: PremiumAIWorkspaceState {
+        PremiumAIWorkspaceState.make(
+            note: note,
+            summaryExecutionPlan: summaryExecutionPlan
+        )
+    }
+
     private var resolvedWorkspaceState: NoteWorkspacePresentationState {
         workspaceState ?? NoteWorkspacePresentationState.make(
             note: note,
@@ -1506,7 +1513,26 @@ private struct MeetingDetailView: View {
 
     private var aiWorkspaceMode: some View {
         VStack(alignment: .leading, spacing: 24) {
-            aiWorkspaceSection
+            premiumAIWorkspaceHeader
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    aiConversationWorkspace
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 20) {
+                        aiActionRail
+                        aiGroundingRail
+                    }
+                    .frame(width: 320, alignment: .topLeading)
+                }
+
+                VStack(alignment: .leading, spacing: 20) {
+                    aiConversationWorkspace
+                    aiActionRail
+                    aiGroundingRail
+                }
+            }
         }
     }
 
@@ -1531,6 +1557,30 @@ private struct MeetingDetailView: View {
 
             structuredWorkflowHistory
         }
+    }
+
+    private var aiStarterPrompts: [String] {
+        if note.enhancedNote != nil {
+            return [
+                "What changed in the meeting?",
+                "What should I do next?",
+                "What decisions were made?"
+            ]
+        }
+
+        if !note.transcriptSegments.isEmpty {
+            return [
+                "What are the main takeaways?",
+                "What should I follow up on?",
+                "Summarize the key decision."
+            ]
+        }
+
+        return [
+            "What stands out in these notes?",
+            "Turn this into a short recap.",
+            "What should I clarify next?"
+        ]
     }
 
     private var workspaceBackground: some View {
@@ -1732,59 +1782,60 @@ private struct MeetingDetailView: View {
         }
     }
 
-    private var aiWorkspaceSection: some View {
-        DetailCard(title: "AI Workspace") {
+    private var premiumAIWorkspaceHeader: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Meeting AI",
+            title: premiumAIWorkspaceState.title,
+            subtitle: premiumAIWorkspaceState.subtitle,
+            tint: premiumAIWorkspaceState.tone.tintColor
+        ) {
             VStack(alignment: .leading, spacing: 16) {
-                Text(aiWorkspaceState.introText)
-                    .foregroundStyle(.secondary)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Quick Drafts")
-                        .font(.headline)
-
-                    HStack(spacing: 10) {
-                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isDraftingAction), id: \.self) { kind in
-                            Button {
-                                submitAssistantDraftAction(kind)
-                            } label: {
-                                Label(kind.displayLabel, systemImage: kind.actionSystemImage)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
-                        }
-                    }
-
-                    Text("These actions use the same grounded note-local thread as freeform prompts and save into the conversation below.")
-                        .font(.caption)
+                if let supportingDetail = premiumAIWorkspaceState.supportingDetail {
+                    Text(supportingDetail)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Structured Workflows")
-                        .font(.headline)
-
-                    HStack(spacing: 10) {
-                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow), id: \.self) { kind in
-                            Button {
-                                submitAssistantDraftAction(kind)
-                            } label: {
-                                Label(kind.displayLabel, systemImage: kind.actionSystemImage)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
-                        }
-                    }
-
-                    Text("These actions stay scoped to this meeting and turn the note into a grounded readout of decisions, risks, and follow-up work.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    WorkspaceHeroBadge(
+                        title: "Thread",
+                        value: premiumAIWorkspaceState.threadCountText,
+                        color: premiumAIWorkspaceState.tone.tintColor
+                    )
+                    WorkspaceHeroBadge(
+                        title: "Citations",
+                        value: premiumAIWorkspaceState.citationCountText,
+                        color: .purple
+                    )
+                    WorkspaceHeroBadge(
+                        title: "Grounding",
+                        value: premiumAIWorkspaceState.sourceCountText,
+                        color: .blue
+                    )
                 }
+            }
+        }
+    }
 
+    private var aiConversationWorkspace: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Thread",
+            title: note.assistantThread.turns.isEmpty ? "Start with a grounded question" : "Conversation for this meeting",
+            subtitle: note.assistantThread.turns.isEmpty
+                ? "Freeform prompts, quick drafts, and structured workflows all land in one durable thread attached to this note."
+                : "The thread stays scoped to this meeting and keeps prompts, drafts, retries, and citations together in one place.",
+            tint: .purple
+        ) {
+            VStack(alignment: .leading, spacing: 20) {
                 if note.assistantThread.turns.isEmpty {
-                    Text(aiWorkspaceState.emptyStateText)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(aiWorkspaceState.emptyStateText)
+                            .foregroundStyle(.secondary)
+
+                        aiStarterPromptSection
+                    }
                 } else {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
                         ForEach(note.assistantThread.turns) { turn in
                             AssistantWorkspaceTurnView(
                                 turn: turn,
@@ -1798,42 +1849,210 @@ private struct MeetingDetailView: View {
 
                 Divider()
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Ask Anything")
-                        .font(.headline)
+                aiComposerSection
+            }
+        }
+    }
 
-                    TextEditor(text: $assistantPrompt)
-                        .font(.body)
-                        .frame(minHeight: 80)
-                        .disabled(!aiWorkspaceState.canInteract)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.secondary.opacity(0.18))
-                        )
+    private var aiStarterPromptSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Try a grounded prompt")
+                .font(.headline)
 
-                    HStack(alignment: .center, spacing: 12) {
-                        Text(note.hasPendingAssistantTurn
-                             ? "Oatmeal is generating the latest answer for this note."
-                             : aiWorkspaceState.composerFootnote)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Spacer()
-
-                        Button("Send") {
-                            let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !prompt.isEmpty else {
-                                return
-                            }
-                            assistantPrompt = ""
-                            submitAssistantPrompt(prompt)
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(aiStarterPrompts, id: \.self) { prompt in
+                    Button {
+                        assistantPrompt = prompt
+                    } label: {
+                        HStack(alignment: .center, spacing: 10) {
+                            Image(systemName: "arrow.up.left.and_arrow.down.right")
+                                .foregroundStyle(.purple)
+                            Text(prompt)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text("Use")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.purple)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            !aiWorkspaceState.canInteract
-                                || assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                || note.hasPendingAssistantTurn
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
                         )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.purple.opacity(0.10))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!aiWorkspaceState.canInteract || note.hasPendingAssistantTurn)
+                }
+            }
+        }
+    }
+
+    private var aiComposerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Ask anything about this meeting")
+                .font(.headline)
+
+            TextEditor(text: $assistantPrompt)
+                .font(.body)
+                .frame(minHeight: 108)
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.10))
+                )
+                .disabled(!aiWorkspaceState.canInteract)
+
+            HStack(alignment: .center, spacing: 12) {
+                Text(
+                    note.hasPendingAssistantTurn
+                        ? "Oatmeal is generating the latest answer for this note."
+                        : aiWorkspaceState.composerFootnote
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button("Send") {
+                    let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !prompt.isEmpty else {
+                        return
+                    }
+                    assistantPrompt = ""
+                    submitAssistantPrompt(prompt)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    !aiWorkspaceState.canInteract
+                        || assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || note.hasPendingAssistantTurn
+                )
+            }
+        }
+    }
+
+    private var aiActionRail: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Actions",
+            title: "Drafts & structured workflows",
+            subtitle: "High-value AI actions stay easy to trigger, but now live in a cleaner rail that feels part of the note workspace.",
+            tint: .purple
+        ) {
+            VStack(alignment: .leading, spacing: 18) {
+                premiumAIActionSection(
+                    title: "Quick Drafts",
+                    detail: "Turn this meeting into a ready-to-send artifact without leaving the note.",
+                    kinds: NoteAssistantTurnKind.allCases.filter(\.isDraftingAction)
+                )
+
+                premiumAIActionSection(
+                    title: "Structured Workflows",
+                    detail: "Generate grounded action items, decisions, and risks directly from this note’s material.",
+                    kinds: NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow)
+                )
+            }
+        }
+    }
+
+    private func premiumAIActionSection(
+        title: String,
+        detail: String,
+        kinds: [NoteAssistantTurnKind]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(kinds, id: \.self) { kind in
+                    Button {
+                        submitAssistantDraftAction(kind)
+                    } label: {
+                        HStack(alignment: .center, spacing: 12) {
+                            Image(systemName: kind.actionSystemImage)
+                                .foregroundStyle(.purple)
+                                .frame(width: 18)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(kind.displayLabel)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text(kind.pendingStatusMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.purple.opacity(0.10))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
+                }
+            }
+        }
+    }
+
+    private var aiGroundingRail: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Grounded To This Note",
+            title: "Trust the scope",
+            subtitle: "The AI mode stays useful because it stays narrow: one meeting, one thread, one grounded set of local sources.",
+            tint: .blue
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(aiWorkspaceState.introText)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(premiumAIWorkspaceState.sources) { source in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text(source.title)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(source.readiness.label)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(source.readiness.color.opacity(0.12), in: Capsule())
+                                    .foregroundStyle(source.readiness.color)
+                            }
+
+                            Text(source.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.bottom, 2)
                     }
                 }
             }
@@ -3998,8 +4217,8 @@ private struct AssistantWorkspaceTurnView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                    if turn.kind.isDraftingAction {
-                        Text(turn.kind.displayLabel)
+                    if turn.kind != .prompt {
+                        Label(turn.kind.displayLabel, systemImage: turn.kind.actionSystemImage)
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -4021,7 +4240,11 @@ private struct AssistantWorkspaceTurnView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.accentColor.opacity(0.08))
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.accentColor.opacity(0.10))
             )
 
             VStack(alignment: .leading, spacing: 8) {
@@ -4106,7 +4329,11 @@ private struct AssistantWorkspaceTurnView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.08))
+                    .fill(Color(nsColor: .windowBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.secondary.opacity(0.08))
             )
         }
     }
@@ -4160,61 +4387,6 @@ struct AssistantCitationNavigationTarget: Equatable, Sendable {
         }
 
         return AssistantCitationNavigationTarget(transcriptSegmentID: transcriptSegmentID)
-    }
-}
-
-struct AIWorkspacePresentationState: Equatable, Sendable {
-    let canInteract: Bool
-    let introText: String
-    let emptyStateText: String
-    let composerFootnote: String
-
-    static func make(
-        note: MeetingNote,
-        summaryExecutionPlan: LocalSummaryExecutionPlan?
-    ) -> AIWorkspacePresentationState {
-        if !note.isAIWorkspaceAvailable {
-            if note.transcriptionStatus == .pending {
-                return AIWorkspacePresentationState(
-                    canInteract: false,
-                    introText: "Oatmeal is still building the local meeting context for this workspace. It will open up as soon as the transcript or your own raw notes are available.",
-                    emptyStateText: "Transcription is still running for this meeting. Add raw notes now or wait for the transcript to finish before asking Oatmeal questions.",
-                    composerFootnote: "This workspace unlocks automatically when Oatmeal has note-local material to ground against."
-                )
-            }
-
-            if note.transcriptionStatus == .failed {
-                return AIWorkspacePresentationState(
-                    canInteract: false,
-                    introText: "Oatmeal does not have enough safe local meeting context to answer yet because the transcript failed and there are no usable raw notes or summary artifacts to ground against.",
-                    emptyStateText: "Retry transcription or add raw notes first. Oatmeal will not guess when the meeting context is still incomplete.",
-                    composerFootnote: "This workspace stays locked until the note has local material Oatmeal can cite safely."
-                )
-            }
-
-            return AIWorkspacePresentationState(
-                canInteract: false,
-                introText: "Oatmeal needs local meeting material before this workspace can answer. It only works from the transcript, raw notes, enhanced note, or live transcript preview attached to this note.",
-                emptyStateText: "Add a few raw notes or wait for capture/transcription to finish, and the workspace will become available automatically.",
-                composerFootnote: "Responses stay note-local and only unlock when Oatmeal has grounded meeting context."
-            )
-        }
-
-        if summaryExecutionPlan?.backend == .placeholder || summaryExecutionPlan?.executionKind == .placeholder {
-            return AIWorkspacePresentationState(
-                canInteract: true,
-                introText: "Ask Oatmeal about this meeting. The richer local summary path is unavailable right now, so answers will stay grounded in the transcript, notes, and metadata already attached to this note.",
-                emptyStateText: "No assistant prompts yet. Ask what changed, what was decided, or generate a draft, and Oatmeal will answer from the local material it already has.",
-                composerFootnote: "Responses stay attached to this meeting and will survive relaunch, even while Oatmeal is using the safer local fallback path."
-            )
-        }
-
-        return AIWorkspacePresentationState(
-            canInteract: true,
-            introText: "Ask Oatmeal about this meeting. Answers stay scoped to this note and cite the local transcript, notes, summary, or meeting metadata they came from.",
-            emptyStateText: "No assistant prompts yet. Ask what changed, what was decided, or generate a draft, and Oatmeal will work from this note only.",
-            composerFootnote: "Responses stay attached to this meeting and will survive relaunch."
-        )
     }
 }
 
