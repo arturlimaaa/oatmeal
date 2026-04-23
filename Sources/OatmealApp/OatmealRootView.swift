@@ -1184,6 +1184,17 @@ private struct MeetingDetailView: View {
         )
     }
 
+    private var premiumNoteWorkspaceStatus: PremiumNoteWorkspaceStatusState {
+        PremiumNoteWorkspaceStatusState.make(
+            note: note,
+            templateName: template?.name
+        )
+    }
+
+    private var premiumTaskWorkspaceSnapshot: PremiumTaskWorkspaceSnapshot {
+        PremiumTaskWorkspaceSnapshot.make(note: note)
+    }
+
     private var resolvedWorkspaceState: NoteWorkspacePresentationState {
         workspaceState ?? NoteWorkspacePresentationState.make(
             note: note,
@@ -1376,34 +1387,51 @@ private struct MeetingDetailView: View {
 
     private var notesWorkspace: some View {
         VStack(alignment: .leading, spacing: 24) {
-            summaryCards
+            premiumNoteWorkspaceStatusCard
 
-            if note.processingState.isActive || note.transcriptionStatus == .failed || note.generationStatus == .failed {
-                processingSection
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    premiumMeetingNoteCanvas
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 20) {
+                        notesWorkspaceTaskRail
+
+                        if let liveTranscriptPanelState {
+                            liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                        }
+                    }
+                    .frame(width: 320, alignment: .topLeading)
+                }
+
+                VStack(alignment: .leading, spacing: 20) {
+                    premiumMeetingNoteCanvas
+                    notesWorkspaceTaskRail
+
+                    if let liveTranscriptPanelState {
+                        liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                    }
+                }
             }
 
-            if let liveTranscriptPanelState {
-                liveTranscriptEntryPointSection(liveTranscriptPanelState)
+            if note.rawNotes.nilIfBlank != nil {
+                workingNotesSection
             }
-
-            rawNotesSection
 
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 20) {
                     metadataSection
                     captureSection
-                    if !note.processingState.isActive && note.transcriptionStatus != .failed && note.generationStatus != .failed {
-                        processingSection
-                    }
+                    processingSection
                     transcriptionSection
                     summaryRuntimeSection
                 }
                 .padding(.top, 16)
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Technical Details")
+                    Text("Meeting Details & Diagnostics")
                         .font(.headline)
-                    Text("Runtime, capture, and processing details stay available here without taking over the note.")
+                    Text("Capture, runtime, and recovery details stay available here without taking over the note.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1441,7 +1469,23 @@ private struct MeetingDetailView: View {
 
     private var tasksWorkspace: some View {
         VStack(alignment: .leading, spacing: 24) {
-            structuredTasksOverview
+            premiumTasksWorkspaceHeader
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    premiumActionItemsWorkspace
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    premiumDecisionsWorkspace
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                VStack(alignment: .leading, spacing: 20) {
+                    premiumActionItemsWorkspace
+                    premiumDecisionsWorkspace
+                }
+            }
+
             structuredWorkflowHistory
         }
     }
@@ -1450,52 +1494,182 @@ private struct MeetingDetailView: View {
         Color(nsColor: .textBackgroundColor)
     }
 
-    private var summaryCards: some View {
-        HStack(alignment: .top, spacing: 16) {
-            DetailCard(title: "Enhanced Note") {
-                if let enhanced = note.enhancedNote {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(enhanced.summary)
-                            .font(.title3.weight(.semibold))
+    private var premiumNoteWorkspaceStatusCard: some View {
+        PremiumWorkspacePanel(
+            eyebrow: premiumNoteWorkspaceStatus.tone == .ready ? "Ready" : "Workspace State",
+            title: premiumNoteWorkspaceStatus.title,
+            subtitle: premiumNoteWorkspaceStatus.detail,
+            tint: premiumNoteWorkspaceStatus.tone.tintColor
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                if let supportingDetail = premiumNoteWorkspaceStatus.supportingDetail {
+                    Text(supportingDetail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
 
-                        ForEach(enhanced.keyDiscussionPoints, id: \.self) { bullet in
-                            Label(bullet, systemImage: "circle.fill")
-                                .labelStyle(.oatmealBullet)
+                if premiumNoteWorkspaceStatus.tone == .failed || premiumNoteWorkspaceStatus.tone == .processing {
+                    HStack(spacing: 10) {
+                        if canRetryTranscription {
+                            Button("Retry transcription") {
+                                retryTranscription()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+
+                        if canRetryGeneration {
+                            Button("Retry polished note") {
+                                retryGeneration()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if note.processingState.isActive {
+                            Label("Oatmeal keeps running the post-meeting pipeline in the background.", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var premiumMeetingNoteCanvas: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Meeting Note",
+            title: note.enhancedNote == nil ? "Polished recap" : "Polished recap",
+            subtitle: note.enhancedNote == nil
+                ? "This view stays centered on the polished meeting note instead of scattering summary and tasks across separate utility cards."
+                : "The main note stays focused on what matters most after the meeting: summary, key points, decisions, and risks.",
+            tint: .accentColor
+        ) {
+            VStack(alignment: .leading, spacing: 24) {
+                if let enhanced = note.enhancedNote {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(enhanced.summary)
+                            .font(.system(size: 24, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
+
+                        if !enhanced.keyDiscussionPoints.isEmpty {
+                            premiumNoteSection(
+                                title: "Key Discussion",
+                                systemImage: "text.quote"
+                            ) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    ForEach(enhanced.keyDiscussionPoints, id: \.self) { bullet in
+                                        Label(bullet, systemImage: "circle.fill")
+                                            .labelStyle(.oatmealBullet)
+                                    }
+                                }
+                            }
                         }
 
                         if !enhanced.decisions.isEmpty {
-                            Divider()
-                            Text("Decisions")
-                                .font(.headline)
-                            ForEach(enhanced.decisions, id: \.self) { decision in
-                                Label(decision, systemImage: "checkmark.seal.fill")
-                                    .labelStyle(.oatmealBullet)
+                            premiumNoteSection(
+                                title: "Decisions",
+                                systemImage: "checkmark.seal.fill"
+                            ) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    ForEach(enhanced.decisions, id: \.self) { decision in
+                                        Label(decision, systemImage: "checkmark.circle.fill")
+                                            .labelStyle(.oatmealBullet)
+                                    }
+                                }
+                            }
+                        }
+
+                        if !enhanced.risksOrOpenQuestions.isEmpty {
+                            premiumNoteSection(
+                                title: "Risks & Open Questions",
+                                systemImage: "exclamationmark.bubble.fill"
+                            ) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    ForEach(enhanced.risksOrOpenQuestions, id: \.self) { risk in
+                                        Label(risk, systemImage: "circle.fill")
+                                            .labelStyle(.oatmealBullet)
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
-                    Text("Stop capture to generate the first enhanced note from the transcript, raw notes, and template context.")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("The polished note will take shape here as soon as Oatmeal has enough meeting material to work from.")
+                            .font(.title3.weight(.semibold))
+
+                        if note.rawNotes.nilIfBlank == nil {
+                            Text("Capture, transcript, or raw notes will turn this into the final recap. Until then, Oatmeal keeps the workspace calm and focused instead of filling it with operational scaffolding.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            premiumNoteSection(
+                                title: "Working Notes",
+                                systemImage: "square.and.pencil"
+                            ) {
+                                Text(note.rawNotes)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
 
-            DetailCard(title: "Action Items") {
-                let actionItems = note.enhancedNote?.actionItems ?? []
-                if actionItems.isEmpty {
-                    Text("No action items yet.")
+    private var notesWorkspaceTaskRail: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Follow-up",
+            title: "Tasks & next steps",
+            subtitle: premiumTaskWorkspaceSnapshot.hasStructuredContent
+                ? "Follow-up work stays attached to the meeting instead of being buried in a secondary utilities column."
+                : "As action items, decisions, and risks emerge, Oatmeal keeps them here as a clean meeting-side rail.",
+            tint: .orange
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    WorkspaceHeroBadge(
+                        title: "Open",
+                        value: "\(premiumTaskWorkspaceSnapshot.openItems.count)",
+                        color: .orange
+                    )
+
+                    WorkspaceHeroBadge(
+                        title: "Decisions",
+                        value: "\(premiumTaskWorkspaceSnapshot.decisions.count)",
+                        color: .green
+                    )
+
+                    WorkspaceHeroBadge(
+                        title: "Risks",
+                        value: "\(premiumTaskWorkspaceSnapshot.risks.count)",
+                        color: .pink
+                    )
+                }
+
+                if premiumTaskWorkspaceSnapshot.totalActionItemCount == 0 {
+                    Text("No structured action items are attached to this note yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(actionItems) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.text)
-                                    .font(.headline)
-                                Text(item.assignee ?? "Unassigned")
-                                    .foregroundStyle(.secondary)
-                            }
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(premiumTaskWorkspaceSnapshot.openItems.prefix(3))) { item in
+                            PremiumActionItemRow(item: item)
+                        }
+
+                        if premiumTaskWorkspaceSnapshot.totalActionItemCount > 3 {
+                            Text("\(premiumTaskWorkspaceSnapshot.totalActionItemCount - 3) more items live in the Tasks mode.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
+
+                Button {
+                    setSelectedWorkspaceMode(.tasks)
+                } label: {
+                    Label("Open Tasks workspace", systemImage: "arrow.right.circle")
+                }
+                .buttonStyle(.bordered)
             }
         }
     }
@@ -1623,14 +1797,37 @@ private struct MeetingDetailView: View {
         }
     }
 
-    private var structuredTasksOverview: some View {
-        DetailCard(title: "Tasks & Decisions") {
-            VStack(alignment: .leading, spacing: 18) {
+    private var premiumTasksWorkspaceHeader: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Tasks Workspace",
+            title: "Follow-up work for this meeting",
+            subtitle: "Tasks, decisions, and open questions stay grounded to this note so the follow-up picture is easy to scan.",
+            tint: .orange
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    WorkspaceHeroBadge(
+                        title: "Open",
+                        value: "\(premiumTaskWorkspaceSnapshot.openItems.count)",
+                        color: .orange
+                    )
+                    WorkspaceHeroBadge(
+                        title: "Delegated",
+                        value: "\(premiumTaskWorkspaceSnapshot.delegatedItems.count)",
+                        color: .blue
+                    )
+                    WorkspaceHeroBadge(
+                        title: "Done",
+                        value: "\(premiumTaskWorkspaceSnapshot.doneItems.count)",
+                        color: .green
+                    )
+                }
+
                 HStack(spacing: 10) {
                     Button {
                         submitAssistantDraftAction(.actionItems)
                     } label: {
-                        Label("Refresh Action Items", systemImage: NoteAssistantTurnKind.actionItems.actionSystemImage)
+                        Label("Refresh action items", systemImage: NoteAssistantTurnKind.actionItems.actionSystemImage)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
@@ -1638,59 +1835,84 @@ private struct MeetingDetailView: View {
                     Button {
                         submitAssistantDraftAction(.decisionsAndRisks)
                     } label: {
-                        Label("Refresh Decisions & Risks", systemImage: NoteAssistantTurnKind.decisionsAndRisks.actionSystemImage)
+                        Label("Refresh decisions & risks", systemImage: NoteAssistantTurnKind.decisionsAndRisks.actionSystemImage)
                     }
                     .buttonStyle(.bordered)
                     .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
                 }
+            }
+        }
+    }
 
-                let actionItems = note.enhancedNote?.actionItems ?? []
-                if actionItems.isEmpty {
-                    Text("No structured action items are attached to this note yet.")
+    private var premiumActionItemsWorkspace: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Action Items",
+            title: premiumTaskWorkspaceSnapshot.totalActionItemCount == 0 ? "No structured follow-up yet" : "Action items",
+            subtitle: premiumTaskWorkspaceSnapshot.totalActionItemCount == 0
+                ? "Run the structured workflows or let the polished note finish generating to populate this space."
+                : "Open work, delegated items, and completed follow-up all stay tied to this meeting.",
+            tint: .orange
+        ) {
+            VStack(alignment: .leading, spacing: 18) {
+                if premiumTaskWorkspaceSnapshot.totalActionItemCount == 0 {
+                    Text("Oatmeal will surface follow-up work here once this meeting produces structured action items.")
                         .foregroundStyle(.secondary)
                 } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(actionItems) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.text)
-                                    .font(.headline)
-                                Text(item.assignee ?? "Unassigned")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                            )
-                        }
-                    }
+                    premiumTaskSection(
+                        title: "Open",
+                        items: premiumTaskWorkspaceSnapshot.openItems
+                    )
+
+                    premiumTaskSection(
+                        title: "Delegated",
+                        items: premiumTaskWorkspaceSnapshot.delegatedItems
+                    )
+
+                    premiumTaskSection(
+                        title: "Completed",
+                        items: premiumTaskWorkspaceSnapshot.doneItems
+                    )
                 }
+            }
+        }
+    }
 
-                if let enhanced = note.enhancedNote,
-                   !enhanced.decisions.isEmpty || !enhanced.risksOrOpenQuestions.isEmpty {
-                    Divider()
-
-                    if !enhanced.decisions.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Decisions")
-                                .font(.headline)
-
-                            ForEach(enhanced.decisions, id: \.self) { decision in
-                                Label(decision, systemImage: "checkmark.seal.fill")
-                                    .labelStyle(.oatmealBullet)
+    private var premiumDecisionsWorkspace: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Decisions",
+            title: "Decision log & open questions",
+            subtitle: "Structured takeaways stay visible next to the action list so the meeting’s outcome is legible at a glance.",
+            tint: .green
+        ) {
+            VStack(alignment: .leading, spacing: 20) {
+                if premiumTaskWorkspaceSnapshot.decisions.isEmpty && premiumTaskWorkspaceSnapshot.risks.isEmpty {
+                    Text("No structured decisions or open questions are attached to this meeting yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    if !premiumTaskWorkspaceSnapshot.decisions.isEmpty {
+                        premiumNoteSection(
+                            title: "Decisions",
+                            systemImage: "checkmark.seal.fill"
+                        ) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(premiumTaskWorkspaceSnapshot.decisions, id: \.self) { decision in
+                                    Label(decision, systemImage: "checkmark.circle.fill")
+                                        .labelStyle(.oatmealBullet)
+                                }
                             }
                         }
                     }
 
-                    if !enhanced.risksOrOpenQuestions.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Risks & Open Questions")
-                                .font(.headline)
-
-                            ForEach(enhanced.risksOrOpenQuestions, id: \.self) { risk in
-                                Label(risk, systemImage: "exclamationmark.bubble.fill")
-                                    .labelStyle(.oatmealBullet)
+                    if !premiumTaskWorkspaceSnapshot.risks.isEmpty {
+                        premiumNoteSection(
+                            title: "Risks & Open Questions",
+                            systemImage: "exclamationmark.bubble.fill"
+                        ) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(premiumTaskWorkspaceSnapshot.risks, id: \.self) { risk in
+                                    Label(risk, systemImage: "circle.fill")
+                                        .labelStyle(.oatmealBullet)
+                                }
                             }
                         }
                     }
@@ -1864,8 +2086,15 @@ private struct MeetingDetailView: View {
         }
     }
 
-    private var rawNotesSection: some View {
-        DetailCard(title: "Raw Notes") {
+    private var workingNotesSection: some View {
+        PremiumWorkspacePanel(
+            eyebrow: "Working Material",
+            title: "Raw notes",
+            subtitle: note.rawNotes.nilIfBlank == nil
+                ? "Raw notes stay available as supporting material without competing with the polished meeting note."
+                : "These notes support the polished recap without taking over the main note view.",
+            tint: .secondary
+        ) {
             if note.rawNotes.nilIfBlank == nil {
                 Text("No raw notes yet.")
                     .foregroundStyle(.secondary)
@@ -1873,6 +2102,46 @@ private struct MeetingDetailView: View {
                 TextEditor(text: .constant(note.rawNotes))
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 180)
+            }
+        }
+    }
+
+    private func premiumNoteSection<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .foregroundStyle(.primary)
+
+            content()
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.secondary.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
+    private func premiumTaskSection(title: String, items: [ActionItem]) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title)
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(items) { item in
+                        PremiumActionItemRow(item: item)
+                    }
+                }
             }
         }
     }
@@ -3323,6 +3592,44 @@ private struct ProcessingJobRow: View {
     }
 }
 
+private struct PremiumWorkspacePanel<Content: View>: View {
+    let eyebrow: String
+    let title: String
+    let subtitle: String
+    let tint: Color
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(eyebrow.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(tint)
+
+                Text(title)
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            content
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(tint.opacity(0.10))
+        )
+    }
+}
+
 private struct DetailCard<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
@@ -3338,6 +3645,94 @@ private struct DetailCard<Content: View>: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+private struct PremiumActionItemRow: View {
+    let item: ActionItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(statusColor)
+                    .padding(.top, 2)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.text)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    HStack(spacing: 8) {
+                        if let assignee = item.assignee {
+                            Text(assignee)
+                        }
+
+                        if let dueDate = item.dueDate {
+                            Text(dueDate.formatted(date: .abbreviated, time: .omitted))
+                        }
+
+                        if item.assignee == nil, item.dueDate == nil {
+                            Text("No owner yet")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 12)
+
+                Text(statusLabel)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.14), in: Capsule())
+                    .foregroundStyle(statusColor)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.secondary.opacity(0.08))
+        )
+    }
+
+    private var statusSymbol: String {
+        switch item.status {
+        case .open:
+            "circle"
+        case .delegated:
+            "arrowshape.turn.up.right.circle.fill"
+        case .done:
+            "checkmark.circle.fill"
+        }
+    }
+
+    private var statusLabel: String {
+        switch item.status {
+        case .open:
+            "Open"
+        case .delegated:
+            "Delegated"
+        case .done:
+            "Done"
+        }
+    }
+
+    private var statusColor: Color {
+        switch item.status {
+        case .open:
+            .orange
+        case .delegated:
+            .blue
+        case .done:
+            .green
+        }
     }
 }
 
