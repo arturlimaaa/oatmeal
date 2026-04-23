@@ -1172,6 +1172,7 @@ private struct MeetingDetailView: View {
     @State private var isLiveTranscriptPanelExpanded = false
     @State private var assistantPrompt = ""
     @State private var highlightedTranscriptSegmentID: UUID?
+    @State private var transcriptScrollRequest = 0
 
     private var liveTranscriptPanelState: LiveTranscriptPanelState? {
         LiveTranscriptPanelAdapter.panelState(for: note)
@@ -1193,6 +1194,13 @@ private struct MeetingDetailView: View {
 
     private var premiumTaskWorkspaceSnapshot: PremiumTaskWorkspaceSnapshot {
         PremiumTaskWorkspaceSnapshot.make(note: note)
+    }
+
+    private var premiumTranscriptWorkspaceState: PremiumTranscriptWorkspaceState {
+        PremiumTranscriptWorkspaceState.make(
+            note: note,
+            highlightedSegmentID: highlightedTranscriptSegmentID
+        )
     }
 
     private var resolvedWorkspaceState: NoteWorkspacePresentationState {
@@ -1231,6 +1239,7 @@ private struct MeetingDetailView: View {
                 isLiveTranscriptPanelExpanded = note.liveSessionState.isTranscriptPanelPresented
                 assistantPrompt = ""
                 highlightedTranscriptSegmentID = nil
+                transcriptScrollRequest = 0
             }
             .onChange(of: isLiveTranscriptPanelPresented) { _, newValue in
                 isLiveTranscriptPanelExpanded = newValue
@@ -1245,10 +1254,19 @@ private struct MeetingDetailView: View {
                 guard let segmentID else {
                     return
                 }
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo(transcriptSectionScrollID, anchor: .top)
-                    proxy.scrollTo(segmentID, anchor: .center)
+                scrollToTranscript(segmentID, using: proxy)
+            }
+            .onChange(of: transcriptScrollRequest) { _, _ in
+                guard let segmentID = highlightedTranscriptSegmentID else {
+                    return
                 }
+                scrollToTranscript(segmentID, using: proxy)
+            }
+            .onChange(of: resolvedWorkspaceState.selectedMode) { _, newMode in
+                guard newMode == .transcript, let segmentID = highlightedTranscriptSegmentID else {
+                    return
+                }
+                scrollToTranscript(segmentID, using: proxy)
             }
         }
     }
@@ -1449,15 +1467,40 @@ private struct MeetingDetailView: View {
 
     private var transcriptWorkspace: some View {
         VStack(alignment: .leading, spacing: 24) {
-            if let liveTranscriptPanelState {
-                if shouldShowLiveTranscriptPanel {
-                    liveTranscriptSection(liveTranscriptPanelState)
-                } else {
-                    liveTranscriptEntryPointSection(liveTranscriptPanelState)
+            premiumTranscriptWorkspaceHeader
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    transcriptSection
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 20) {
+                        transcriptWorkspaceFocusRail
+
+                        if let liveTranscriptPanelState {
+                            if shouldShowLiveTranscriptPanel {
+                                liveTranscriptSection(liveTranscriptPanelState)
+                            } else {
+                                liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                            }
+                        }
+                    }
+                    .frame(width: 320, alignment: .topLeading)
+                }
+
+                VStack(alignment: .leading, spacing: 20) {
+                    transcriptSection
+                    transcriptWorkspaceFocusRail
+
+                    if let liveTranscriptPanelState {
+                        if shouldShowLiveTranscriptPanel {
+                            liveTranscriptSection(liveTranscriptPanelState)
+                        } else {
+                            liveTranscriptEntryPointSection(liveTranscriptPanelState)
+                        }
+                    }
                 }
             }
-
-            transcriptSection
         }
     }
 
@@ -2106,6 +2149,75 @@ private struct MeetingDetailView: View {
         }
     }
 
+    private var premiumTranscriptWorkspaceHeader: some View {
+        PremiumWorkspacePanel(
+            eyebrow: premiumTranscriptWorkspaceState.tone == .focused ? "Transcript Focus" : "Transcript Workspace",
+            title: premiumTranscriptWorkspaceState.title,
+            subtitle: premiumTranscriptWorkspaceState.subtitle,
+            tint: premiumTranscriptWorkspaceState.tone.tintColor
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                if let supportingDetail = premiumTranscriptWorkspaceState.supportingDetail {
+                    Text(supportingDetail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 10) {
+                    WorkspaceHeroBadge(
+                        title: "Transcript",
+                        value: premiumTranscriptWorkspaceState.segmentCountText,
+                        color: premiumTranscriptWorkspaceState.tone.tintColor
+                    )
+
+                    if let speakerCountText = premiumTranscriptWorkspaceState.speakerCountText {
+                        WorkspaceHeroBadge(
+                            title: "Speakers",
+                            value: speakerCountText,
+                            color: .secondary
+                        )
+                    }
+
+                    WorkspaceHeroBadge(
+                        title: "Mode",
+                        value: "Review",
+                        color: .blue
+                    )
+                }
+            }
+        }
+    }
+
+    private var transcriptWorkspaceFocusRail: some View {
+        PremiumWorkspacePanel(
+            eyebrow: premiumTranscriptWorkspaceState.focusTitle == nil ? "Review Flow" : "Focused Citation",
+            title: premiumTranscriptWorkspaceState.focusTitle ?? "Transcript stays secondary",
+            subtitle: premiumTranscriptWorkspaceState.focusExcerpt ?? "Transcript mode is where Oatmeal lets you verify exact meeting language without taking over the polished note workspace.",
+            tint: premiumTranscriptWorkspaceState.focusTitle == nil ? .blue : premiumTranscriptWorkspaceState.tone.tintColor
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                if premiumTranscriptWorkspaceState.focusTitle == nil {
+                    Text("Use this space to validate grounded answers, inspect phrasing, and trace the meeting line-by-line. When you’re done, jump back to Notes for the polished recap.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button {
+                        highlightedTranscriptSegmentID = nil
+                    } label: {
+                        Label("Clear transcript focus", systemImage: "arrow.uturn.backward.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Button {
+                    setSelectedWorkspaceMode(.notes)
+                } label: {
+                    Label("Return to Notes", systemImage: "arrow.left.circle")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
     private func premiumNoteSection<Content: View>(
         title: String,
         systemImage: String,
@@ -2278,27 +2390,52 @@ private struct MeetingDetailView: View {
     }
 
     private var transcriptSection: some View {
-        DetailCard(title: "Transcript") {
+        PremiumWorkspacePanel(
+            eyebrow: "Transcript",
+            title: note.transcriptSegments.isEmpty ? "No transcript yet" : "Meeting transcript",
+            subtitle: note.transcriptSegments.isEmpty
+                ? transcriptPlaceholderText
+                : "A deliberate reading surface for transcript review, verification, and source inspection.",
+            tint: .blue
+        ) {
             if note.transcriptSegments.isEmpty {
                 Text(transcriptPlaceholderText)
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(note.transcriptSegments) { segment in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(segmentHeader(segment))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center, spacing: 10) {
+                                Text(segmentHeader(segment))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+
+                                if highlightedTranscriptSegmentID == segment.id {
+                                    Text("Focused")
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+
                             Text(segment.text)
+                                .font(.body)
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
                         }
-                        .padding(10)
+                        .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(highlightedTranscriptSegmentID == segment.id ? Color.accentColor.opacity(0.10) : Color.clear)
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(highlightedTranscriptSegmentID == segment.id ? Color.accentColor.opacity(0.10) : Color(nsColor: .controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(highlightedTranscriptSegmentID == segment.id ? Color.accentColor.opacity(0.26) : Color.secondary.opacity(0.08))
                         )
                         .id(segment.id)
-                        .padding(.bottom, 4)
                     }
                 }
             }
@@ -2311,12 +2448,27 @@ private struct MeetingDetailView: View {
     }
 
     private func handleAssistantCitationTap(_ citation: NoteAssistantCitation) {
-        guard let route = AssistantCitationNavigationTarget.resolve(citation: citation, in: note) else {
+        guard let route = TranscriptWorkspaceRoute.resolve(citation: citation, in: note) else {
             return
         }
 
-        setSelectedWorkspaceMode(.transcript)
+        setSelectedWorkspaceMode(route.workspaceMode)
+        if highlightedTranscriptSegmentID == route.transcriptSegmentID {
+            transcriptScrollRequest += 1
+        }
         highlightedTranscriptSegmentID = route.transcriptSegmentID
+    }
+
+    private func scrollToTranscript(
+        _ segmentID: UUID,
+        using proxy: ScrollViewProxy
+    ) {
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(transcriptSectionScrollID, anchor: .top)
+                proxy.scrollTo(segmentID, anchor: .center)
+            }
+        }
     }
 
     private var captureLabel: String {
