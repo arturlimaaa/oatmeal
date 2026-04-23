@@ -117,4 +117,37 @@ final class WorkspaceShellTests: AIWorkspaceTestCase {
         XCTAssertEqual(model.selectedNoteWorkspaceMode, .notes)
         XCTAssertEqual(model.selectedNote?.title, "Quick Note")
     }
+
+    func testDeletingSelectedNoteSelectsNextAvailableNoteAndResetsMode() {
+        let first = MeetingNote(
+            id: UUID(uuidString: "F4000000-0000-0000-0000-000000000001")!,
+            title: "First",
+            origin: .quickNote(createdAt: date(1_700_403_000))
+        )
+        let secondID = UUID(uuidString: "F4000000-0000-0000-0000-000000000002")!
+        let second = MeetingNote(
+            id: secondID,
+            title: "Second",
+            origin: .quickNote(createdAt: date(1_700_403_100))
+        )
+
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [first, second],
+            persistence: persistence,
+            assistantService: StubSingleMeetingAssistantService(mode: .success("Unused")),
+            nowProvider: { self.date(1_700_403_200) }
+        )
+
+        model.setSelectedSidebarItem(.allNotes)
+        model.setSelectedNoteID(first.id)
+        model.setSelectedNoteWorkspaceMode(.ai)
+        model.deleteSelectedNote()
+
+        XCTAssertEqual(model.notes.count, 1)
+        XCTAssertEqual(model.selectedNoteID, secondID)
+        XCTAssertEqual(model.selectedNoteWorkspaceMode, .notes)
+    }
 }

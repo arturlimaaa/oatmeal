@@ -166,6 +166,13 @@ final class AppViewModel {
         set { selectedTemplateID = newValue?.id }
     }
 
+    var canDeleteSelectedNote: Bool {
+        guard let note = selectedNote else {
+            return false
+        }
+        return canDelete(note: note)
+    }
+
     var sessionControllerState: SessionControllerState? {
         SessionControllerAdapter.controllerState(for: notes, selectedNoteID: selectedNoteID)
     }
@@ -547,6 +554,40 @@ final class AppViewModel {
 
     func setSelectedTemplateID(_ id: NoteTemplate.ID?) {
         selectedTemplateID = id
+        persistState()
+    }
+
+    func deleteSelectedNote() {
+        guard let note = selectedNote else {
+            return
+        }
+        deleteNote(id: note.id)
+    }
+
+    func deleteNote(id: MeetingNote.ID) {
+        guard let note = store.note(id: id), canDelete(note: note) else {
+            return
+        }
+
+        assistantTasks[id]?.cancel()
+        assistantTasks[id] = nil
+        liveTranscriptionTasks[id]?.cancel()
+        liveTranscriptionTasks[id] = nil
+        processingTasks[id]?.cancel()
+        processingTasks[id] = nil
+
+        try? captureEngine.deleteRecording(for: id)
+        store.delete(noteID: id)
+        refresh()
+
+        if selectedNoteID == id {
+            selectedNoteID = filteredNotes.first?.id ?? notes.first?.id
+            selectedNoteWorkspaceMode = .notes
+            if selectedNoteID == nil {
+                selectedSidebarItem = .allNotes
+            }
+        }
+
         persistState()
     }
 
@@ -2127,6 +2168,15 @@ final class AppViewModel {
             selectedNoteID = note.id
         }
         persistState()
+    }
+
+    private func canDelete(note: MeetingNote) -> Bool {
+        switch note.captureState.phase {
+        case .capturing, .paused:
+            return false
+        case .ready, .complete, .failed:
+            return true
+        }
     }
 
     private func cleanupRecordingArtifactIfEligible(for note: MeetingNote, statusMessages: inout [String]) {

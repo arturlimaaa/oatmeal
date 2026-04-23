@@ -92,17 +92,6 @@ struct OatmealRootView: View {
                     Text("Local-first meeting workspace")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        LibraryMetricPill(
-                            title: "\(model.notes.count)",
-                            systemImage: "note.text"
-                        )
-                        LibraryMetricPill(
-                            title: "\(model.upcomingMeetings.count)",
-                            systemImage: "calendar"
-                        )
-                    }
                 }
 
                 SidebarSection(title: "Workspace", subtitle: "Your notes and next meetings") {
@@ -241,13 +230,15 @@ struct OatmealRootView: View {
                     isLiveTranscriptPanelPresented: note.liveSessionState.isTranscriptPanelPresented,
                     canRetryTranscription: model.canRetryTranscription(for: note),
                     canRetryGeneration: model.canRetryGeneration(for: note),
+                    canDeleteNote: model.canDeleteSelectedNote,
                     setLiveTranscriptPanelPresented: { model.setLiveTranscriptPanelPresented($0, for: note.id) },
                     setSelectedWorkspaceMode: { model.setSelectedNoteWorkspaceMode($0) },
                     submitAssistantPrompt: { model.submitAssistantPrompt($0, for: note.id) },
                     submitAssistantDraftAction: { model.submitAssistantDraftAction($0, for: note.id) },
                     retryAssistantTurn: { model.retryAssistantTurn($0, for: note.id) },
                     retryTranscription: { model.retryTranscription() },
-                    retryGeneration: { model.retryGeneration() }
+                    retryGeneration: { model.retryGeneration() },
+                    deleteNote: { model.deleteSelectedNote() }
                 )
             } else {
                 ContentUnavailableView(
@@ -487,53 +478,42 @@ private struct NoteRow: View {
     let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(note.title)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-
-                    Text(note.enhancedNote?.summary ?? note.rawNotes.nilIfBlank ?? "Ready to capture notes")
-                        .lineLimit(2)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(note.title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
 
                 Spacer(minLength: 8)
 
-                VStack(alignment: .trailing, spacing: 8) {
-                    Text(relativeTimestamp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    StatusPill(
-                        title: noteDisplayStatus,
-                        systemImage: noteStatusSymbolName,
-                        tint: statusColor
-                    )
-                }
+                Text(relativeTimestamp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+
+            Text(note.enhancedNote?.summary ?? note.rawNotes.nilIfBlank ?? "Ready to capture notes")
+                .lineLimit(2)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                MetadataPill(
-                    title: note.calendarEvent == nil ? "Quick note" : "Meeting",
-                    systemImage: note.calendarEvent == nil ? "bolt.circle" : "calendar"
-                )
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+
+                Text(noteDisplayStatus)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
                 if let folder {
-                    MetadataPill(title: folder.name, systemImage: "folder")
-                }
-                if let attendeeContext {
-                    MetadataPill(title: attendeeContext, systemImage: "person.2")
-                }
-                if let meetingContext {
-                    MetadataPill(title: meetingContext, systemImage: "clock")
+                    Text("• \(folder.name)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(16)
+        .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
@@ -609,51 +589,10 @@ private struct NoteRow: View {
         }
     }
 
-    private var noteStatusSymbolName: String {
-        switch note.captureState.phase {
-        case .capturing:
-            return "record.circle.fill"
-        case .paused:
-            return "pause.circle.fill"
-        case .failed:
-            return "exclamationmark.triangle.fill"
-        case .complete:
-            switch note.processingState.status {
-            case .queued, .running:
-                return "arrow.triangle.2.circlepath.circle.fill"
-            case .failed:
-                return "exclamationmark.triangle.fill"
-            case .completed:
-                return "checkmark.circle.fill"
-            case .idle:
-                return note.generationStatus == .succeeded ? "checkmark.circle.fill" : "circle.fill"
-            }
-        case .ready:
-            return "circle.fill"
-        }
-    }
-
     private var relativeTimestamp: String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: note.updatedAt, relativeTo: Date())
-    }
-
-    private var attendeeContext: String? {
-        guard let attendees = note.calendarEvent?.attendees, !attendees.isEmpty else {
-            return nil
-        }
-        if attendees.count == 1 {
-            return attendees[0].name
-        }
-        return "\(attendees[0].name) +\(attendees.count - 1)"
-    }
-
-    private var meetingContext: String? {
-        guard let event = note.calendarEvent else {
-            return note.createdAt.formatted(date: .abbreviated, time: .shortened)
-        }
-        return event.startDate.formatted(date: .abbreviated, time: .shortened)
     }
 
     private var rowBackground: some ShapeStyle {
@@ -1162,6 +1101,7 @@ private struct MeetingDetailView: View {
     let isLiveTranscriptPanelPresented: Bool
     let canRetryTranscription: Bool
     let canRetryGeneration: Bool
+    let canDeleteNote: Bool
     let setLiveTranscriptPanelPresented: (Bool) -> Void
     let setSelectedWorkspaceMode: (NoteWorkspaceMode) -> Void
     let submitAssistantPrompt: (String) -> Void
@@ -1169,8 +1109,10 @@ private struct MeetingDetailView: View {
     let retryAssistantTurn: (UUID) -> Void
     let retryTranscription: () -> Void
     let retryGeneration: () -> Void
+    let deleteNote: () -> Void
     @State private var isLiveTranscriptPanelExpanded = false
     @State private var isTechnicalDetailsPresented = false
+    @State private var isDeleteConfirmationPresented = false
     @State private var assistantPrompt = ""
     @State private var highlightedTranscriptSegmentID: UUID?
     @State private var transcriptScrollRequest = 0
@@ -1250,6 +1192,14 @@ private struct MeetingDetailView: View {
             .sheet(isPresented: $isTechnicalDetailsPresented) {
                 technicalDetailsSheet
             }
+            .alert("Delete note?", isPresented: $isDeleteConfirmationPresented) {
+                Button("Delete", role: .destructive) {
+                    deleteNote()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the note and any saved local recording for it.")
+            }
             .onAppear {
                 isLiveTranscriptPanelExpanded = isLiveTranscriptPanelPresented
             }
@@ -1307,51 +1257,64 @@ private struct MeetingDetailView: View {
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 6) {
-                    if let folder {
-                        FolderLabel(folder: folder)
+                Menu {
+                    Button {
+                        setSelectedWorkspaceMode(.notes)
+                    } label: {
+                        Label("Notes", systemImage: "doc.text")
                     }
 
-                    Label(captureLabel, systemImage: "waveform")
-                        .foregroundStyle(statusColor)
+                    Button {
+                        setSelectedWorkspaceMode(.transcript)
+                    } label: {
+                        Label("Transcript", systemImage: "text.alignleft")
+                    }
+
+                    Button {
+                        setSelectedWorkspaceMode(.ai)
+                    } label: {
+                        Label("AI", systemImage: "sparkles")
+                    }
+
+                    Button {
+                        setSelectedWorkspaceMode(.tasks)
+                    } label: {
+                        Label("Tasks", systemImage: "checklist")
+                    }
+
+                    Divider()
 
                     Button {
                         isTechnicalDetailsPresented = true
                     } label: {
                         Label("Technical Details", systemImage: "slider.horizontal.3")
-                            .font(.caption.weight(.semibold))
                     }
-                    .buttonStyle(.bordered)
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        isDeleteConfirmationPresented = true
+                    } label: {
+                        Label("Delete Note", systemImage: "trash")
+                    }
+                    .disabled(!canDeleteNote)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
                 }
+                .menuStyle(.borderlessButton)
             }
-
-            if let attendees = note.calendarEvent?.attendees.map(\.name), !attendees.isEmpty {
-                Text("Participants: \(attendees.joined(separator: ", "))")
-                    .foregroundStyle(.secondary)
-            }
-
-            let timestamp = note.calendarEvent?.startDate ?? note.captureState.startedAt ?? note.createdAt
 
             HStack(spacing: 10) {
-                WorkspaceHeroBadge(
-                    title: "State",
-                    value: captureLabel,
-                    color: statusColor
-                )
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
 
-                WorkspaceHeroBadge(
-                    title: "When",
-                    value: timestamp.formatted(date: .abbreviated, time: .shortened),
-                    color: .secondary
-                )
-
-                if let folder {
-                    WorkspaceHeroBadge(
-                        title: "Folder",
-                        value: folder.name,
-                        color: .blue
-                    )
-                }
+                Text(heroMetaLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(28)
@@ -1369,50 +1332,22 @@ private struct MeetingDetailView: View {
     }
 
     private var workspaceModeBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
+        HStack {
+            Picker("Workspace Mode", selection: Binding(
+                get: { resolvedWorkspaceState.selectedMode },
+                set: { setSelectedWorkspaceMode($0) }
+            )) {
                 ForEach(resolvedWorkspaceState.availableModes) { mode in
-                    Button {
-                        setSelectedWorkspaceMode(mode)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: mode.systemImage)
-                                .font(.system(size: 13, weight: .semibold))
-
-                            Text(mode.title)
-                                .font(.subheadline.weight(.semibold))
-
-                            if let badgeText = resolvedWorkspaceState.badgeText(for: mode, note: note) {
-                                Text(badgeText)
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(
-                                        mode == resolvedWorkspaceState.selectedMode
-                                            ? Color.accentColor.opacity(0.18)
-                                            : Color.secondary.opacity(0.10),
-                                        in: Capsule()
-                                    )
-                            }
-                        }
-                        .foregroundStyle(mode == resolvedWorkspaceState.selectedMode ? .primary : .secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(mode == resolvedWorkspaceState.selectedMode ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(mode == resolvedWorkspaceState.selectedMode ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.08))
-                        )
-                    }
-                    .buttonStyle(.plain)
+                    Text(mode.title).tag(mode)
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 18)
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 380)
+
+            Spacer()
         }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
     }
 
     @ViewBuilder
@@ -1433,33 +1368,20 @@ private struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 24) {
             premiumNoteWorkspaceStatusCard
 
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 20) {
-                    premiumMeetingNoteCanvas
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            premiumMeetingNoteCanvas
 
-                    VStack(alignment: .leading, spacing: 20) {
-                        notesWorkspaceTaskRail
-
-                        if let liveTranscriptPanelState {
-                            liveTranscriptEntryPointSection(liveTranscriptPanelState)
-                        }
-                    }
-                    .frame(width: 320, alignment: .topLeading)
-                }
-
-                VStack(alignment: .leading, spacing: 20) {
-                    premiumMeetingNoteCanvas
-                    notesWorkspaceTaskRail
-
-                    if let liveTranscriptPanelState {
-                        liveTranscriptEntryPointSection(liveTranscriptPanelState)
-                    }
-                }
-            }
+            minimalistWorkspaceLinks
 
             if note.rawNotes.nilIfBlank != nil {
-                workingNotesSection
+                DisclosureGroup("Working notes") {
+                    workingNotesSection
+                        .padding(.top, 14)
+                }
+                .padding(.horizontal, 4)
+            }
+
+            if let liveTranscriptPanelState {
+                liveTranscriptEntryPointSection(liveTranscriptPanelState)
             }
         }
     }
@@ -1552,25 +1474,7 @@ private struct MeetingDetailView: View {
     private var aiWorkspaceMode: some View {
         VStack(alignment: .leading, spacing: 24) {
             premiumAIWorkspaceHeader
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 20) {
-                    aiConversationWorkspace
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 20) {
-                        aiActionRail
-                        aiGroundingRail
-                    }
-                    .frame(width: 320, alignment: .topLeading)
-                }
-
-                VStack(alignment: .leading, spacing: 20) {
-                    aiConversationWorkspace
-                    aiActionRail
-                    aiGroundingRail
-                }
-            }
+            aiConversationWorkspace
         }
     }
 
@@ -1748,6 +1652,33 @@ private struct MeetingDetailView: View {
         }
     }
 
+    private var minimalistWorkspaceLinks: some View {
+        HStack(spacing: 10) {
+            Button {
+                setSelectedWorkspaceMode(.ai)
+            } label: {
+                Label("Ask AI", systemImage: "sparkles")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                setSelectedWorkspaceMode(.tasks)
+            } label: {
+                Label("Tasks", systemImage: "checklist")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                setSelectedWorkspaceMode(.transcript)
+            } label: {
+                Label("Transcript", systemImage: "text.alignleft")
+            }
+            .buttonStyle(.bordered)
+
+            Spacer()
+        }
+    }
+
     private var notesWorkspaceTaskRail: some View {
         PremiumWorkspacePanel(
             eyebrow: "Follow-up",
@@ -1805,6 +1736,26 @@ private struct MeetingDetailView: View {
         }
     }
 
+    private var heroMetaLine: String {
+        let timestamp = (note.calendarEvent?.startDate ?? note.captureState.startedAt ?? note.createdAt)
+            .formatted(date: .abbreviated, time: .shortened)
+        var parts: [String] = [captureLabel, timestamp]
+
+        if let folder {
+            parts.append(folder.name)
+        }
+
+        if let attendees = note.calendarEvent?.attendees.map(\.name), !attendees.isEmpty {
+            if attendees.count == 1 {
+                parts.append(attendees[0])
+            } else {
+                parts.append("\(attendees[0]) +\(attendees.count - 1)")
+            }
+        }
+
+        return parts.joined(separator: " • ")
+    }
+
     private var metadataSection: some View {
         DetailCard(title: "Meeting Context & Status") {
             VStack(alignment: .leading, spacing: 10) {
@@ -1827,30 +1778,15 @@ private struct MeetingDetailView: View {
             subtitle: premiumAIWorkspaceState.subtitle,
             tint: premiumAIWorkspaceState.tone.tintColor
         ) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 if let supportingDetail = premiumAIWorkspaceState.supportingDetail {
                     Text(supportingDetail)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-
-                HStack(spacing: 10) {
-                    WorkspaceHeroBadge(
-                        title: "Thread",
-                        value: premiumAIWorkspaceState.threadCountText,
-                        color: premiumAIWorkspaceState.tone.tintColor
-                    )
-                    WorkspaceHeroBadge(
-                        title: "Citations",
-                        value: premiumAIWorkspaceState.citationCountText,
-                        color: .purple
-                    )
-                    WorkspaceHeroBadge(
-                        title: "Grounding",
-                        value: premiumAIWorkspaceState.sourceCountText,
-                        color: .blue
-                    )
-                }
+                Text("\(premiumAIWorkspaceState.threadCountText) • \(premiumAIWorkspaceState.citationCountText) • \(premiumAIWorkspaceState.sourceCountText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1888,44 +1824,45 @@ private struct MeetingDetailView: View {
                 Divider()
 
                 aiComposerSection
+
+                DisclosureGroup("Actions") {
+                    aiActionRail
+                        .padding(.top, 14)
+                }
+
+                DisclosureGroup("Sources") {
+                    aiGroundingRail
+                        .padding(.top, 14)
+                }
             }
         }
     }
 
     private var aiStarterPromptSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Try a grounded prompt")
-                .font(.headline)
+            Text("Try one of these")
+                .font(.subheadline.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(aiStarterPrompts, id: \.self) { prompt in
-                    Button {
-                        assistantPrompt = prompt
-                    } label: {
-                        HStack(alignment: .center, spacing: 10) {
-                            Image(systemName: "arrow.up.left.and_arrow.down.right")
-                                .foregroundStyle(.purple)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(aiStarterPrompts, id: \.self) { prompt in
+                        Button {
+                            assistantPrompt = prompt
+                        } label: {
                             Text(prompt)
+                                .font(.subheadline)
                                 .foregroundStyle(.primary)
-                            Spacer()
-                            Text("Use")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.purple)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.purple.opacity(0.10))
+                                )
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.purple.opacity(0.10))
-                        )
+                        .buttonStyle(.plain)
+                        .disabled(!aiWorkspaceState.canInteract || note.hasPendingAssistantTurn)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!aiWorkspaceState.canInteract || note.hasPendingAssistantTurn)
                 }
             }
         }
@@ -1933,12 +1870,9 @@ private struct MeetingDetailView: View {
 
     private var aiComposerSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ask anything about this meeting")
-                .font(.headline)
-
             TextEditor(text: $assistantPrompt)
                 .font(.body)
-                .frame(minHeight: 108)
+                .frame(minHeight: 88)
                 .padding(10)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1961,6 +1895,29 @@ private struct MeetingDetailView: View {
 
                 Spacer()
 
+                Menu {
+                    Section("Quick Drafts") {
+                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isDraftingAction), id: \.self) { kind in
+                            Button(kind.displayLabel) {
+                                submitAssistantDraftAction(kind)
+                            }
+                        }
+                    }
+
+                    Section("Structured Workflows") {
+                        ForEach(NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow), id: \.self) { kind in
+                            Button(kind.displayLabel) {
+                                submitAssistantDraftAction(kind)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.title3)
+                }
+                .menuStyle(.borderlessButton)
+                .disabled(note.hasPendingAssistantTurn || !aiWorkspaceState.canInteract)
+
                 Button("Send") {
                     let prompt = assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !prompt.isEmpty else {
@@ -1980,25 +1937,18 @@ private struct MeetingDetailView: View {
     }
 
     private var aiActionRail: some View {
-        PremiumWorkspacePanel(
-            eyebrow: "Actions",
-            title: "Drafts & structured workflows",
-            subtitle: "High-value AI actions stay easy to trigger, but now live in a cleaner rail that feels part of the note workspace.",
-            tint: .purple
-        ) {
-            VStack(alignment: .leading, spacing: 18) {
-                premiumAIActionSection(
-                    title: "Quick Drafts",
-                    detail: "Turn this meeting into a ready-to-send artifact without leaving the note.",
-                    kinds: NoteAssistantTurnKind.allCases.filter(\.isDraftingAction)
-                )
+        VStack(alignment: .leading, spacing: 14) {
+            premiumAIActionSection(
+                title: "Quick drafts",
+                detail: "Turn this meeting into a ready-to-send artifact.",
+                kinds: NoteAssistantTurnKind.allCases.filter(\.isDraftingAction)
+            )
 
-                premiumAIActionSection(
-                    title: "Structured Workflows",
-                    detail: "Generate grounded action items, decisions, and risks directly from this note’s material.",
-                    kinds: NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow)
-                )
-            }
+            premiumAIActionSection(
+                title: "Structured workflows",
+                detail: "Extract action items, decisions, and risks from this meeting.",
+                kinds: NoteAssistantTurnKind.allCases.filter(\.isStructuredWorkflow)
+            )
         }
     }
 
@@ -2037,13 +1987,9 @@ private struct MeetingDetailView: View {
                             }
 
                             Spacer()
-
-                            Image(systemName: "arrow.up.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -2062,36 +2008,26 @@ private struct MeetingDetailView: View {
     }
 
     private var aiGroundingRail: some View {
-        PremiumWorkspacePanel(
-            eyebrow: "Grounded To This Note",
-            title: "Trust the scope",
-            subtitle: "The AI mode stays useful because it stays narrow: one meeting, one thread, one grounded set of local sources.",
-            tint: .blue
-        ) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(aiWorkspaceState.introText)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(aiWorkspaceState.introText)
+                .foregroundStyle(.secondary)
 
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(premiumAIWorkspaceState.sources) { source in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
-                                Text(source.title)
-                                    .font(.subheadline.weight(.semibold))
-                                Text(source.readiness.label)
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(source.readiness.color.opacity(0.12), in: Capsule())
-                                    .foregroundStyle(source.readiness.color)
-                            }
-
-                            Text(source.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.bottom, 2)
+            ForEach(premiumAIWorkspaceState.sources) { source in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(source.title)
+                            .font(.subheadline.weight(.semibold))
+                        Text(source.readiness.label)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(source.readiness.color.opacity(0.12), in: Capsule())
+                            .foregroundStyle(source.readiness.color)
                     }
+
+                    Text(source.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
