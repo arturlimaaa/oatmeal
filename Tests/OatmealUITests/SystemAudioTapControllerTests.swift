@@ -255,7 +255,13 @@ final class SystemAudioTapControllerRealRecordingTests: XCTestCase {
     func testRecordsSystemAudio() async throws {
         try Self.skipIfRealRecordingUnavailable()
 
-        let controller = SystemAudioTapController()
+        // The controller defaults to excluding its own PID. For this test
+        // we need the tap to *include* the test process so the SineWavePlayer
+        // tone actually reaches the capture; override the provider with a
+        // non-existent PID so nothing is excluded in practice.
+        let controller = SystemAudioTapController(
+            processIDProvider: { 1 }
+        )
         try await controller.start()
         defer {
             Task { await controller.stop() }

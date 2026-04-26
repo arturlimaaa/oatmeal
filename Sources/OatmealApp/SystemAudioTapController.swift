@@ -620,14 +620,51 @@ public final class CoreAudioTapBackend: SystemAudioTapBackend, @unchecked Sendab
     // MARK: Helpers
 
     private static func streamFormat(for deviceID: AudioObjectID) throws -> AudioStreamBasicDescription {
+        // Tap aggregate devices expose their audio on the input scope; the
+        // global scope returns an empty format. Query the input scope and
+        // fall back through input-stream virtual format if the device-level
+        // query also comes up empty.
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
+            mScope: kAudioObjectPropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         var asbd = AudioStreamBasicDescription()
-        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &asbd)
+        var status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &asbd)
+        if status == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 {
+            return asbd
+        }
+
+        // Fallback: enumerate input streams and grab the first virtual format.
+        var streamsAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var streamsSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &streamsAddress, 0, nil, &streamsSize) == noErr,
+              streamsSize > 0
+        else {
+            throw SystemAudioTapError.audioFormatUnavailable
+        }
+        let streamCount = Int(streamsSize) / MemoryLayout<AudioObjectID>.size
+        var streams = [AudioObjectID](repeating: 0, count: streamCount)
+        let streamsStatus = streams.withUnsafeMutableBufferPointer { ptr in
+            AudioObjectGetPropertyData(deviceID, &streamsAddress, 0, nil, &streamsSize, ptr.baseAddress!)
+        }
+        guard streamsStatus == noErr, let firstStream = streams.first, firstStream != 0 else {
+            throw SystemAudioTapError.audioFormatUnavailable
+        }
+
+        var virtualFormatAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioStreamPropertyVirtualFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        asbd = AudioStreamBasicDescription()
+        status = AudioObjectGetPropertyData(firstStream, &virtualFormatAddress, 0, nil, &size, &asbd)
         guard status == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 else {
             throw SystemAudioTapError.audioFormatUnavailable
         }
