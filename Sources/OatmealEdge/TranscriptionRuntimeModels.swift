@@ -72,19 +72,52 @@ public struct ManagedLocalModel: Codable, Equatable, Sendable, Identifiable {
     public var displayName: String
     public var fileURL: URL
     public var sizeBytes: Int64?
+    /// Whisper-only classification populated by `LocalModelInventory` at
+    /// discovery time. Optional so synthetic fixtures (tests, mocks) can
+    /// continue to construct `ManagedLocalModel` values without classifying
+    /// every filename. Non-Whisper kinds always leave this nil.
+    public var variant: WhisperModelClassifier.Variant?
+    /// Whisper-only size tier populated by `LocalModelInventory` at discovery
+    /// time. See `variant` for nullability rationale.
+    public var sizeTier: WhisperModelClassifier.SizeTier?
 
     public init(
         id: UUID = UUID(),
         kind: ManagedLocalModelKind,
         displayName: String,
         fileURL: URL,
-        sizeBytes: Int64? = nil
+        sizeBytes: Int64? = nil,
+        variant: WhisperModelClassifier.Variant? = nil,
+        sizeTier: WhisperModelClassifier.SizeTier? = nil
     ) {
         self.id = id
         self.kind = kind
         self.displayName = displayName
         self.fileURL = fileURL
         self.sizeBytes = sizeBytes
+        self.variant = variant
+        self.sizeTier = sizeTier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case displayName
+        case fileURL
+        case sizeBytes
+        case variant
+        case sizeTier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.kind = try container.decode(ManagedLocalModelKind.self, forKey: .kind)
+        self.displayName = try container.decode(String.self, forKey: .displayName)
+        self.fileURL = try container.decode(URL.self, forKey: .fileURL)
+        self.sizeBytes = try container.decodeIfPresent(Int64.self, forKey: .sizeBytes)
+        self.variant = try container.decodeIfPresent(WhisperModelClassifier.Variant.self, forKey: .variant)
+        self.sizeTier = try container.decodeIfPresent(WhisperModelClassifier.SizeTier.self, forKey: .sizeTier)
     }
 }
 

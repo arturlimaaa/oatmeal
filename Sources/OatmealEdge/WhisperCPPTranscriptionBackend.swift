@@ -36,7 +36,8 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         )
         let installation = installationState(
             discoveredModels: discoveredModels,
-            policyModel: policyDecision.modelToUse
+            policyModel: policyDecision.modelToUse,
+            blockingReason: policyDecision.blockingReason
         )
         return TranscriptionBackendStatus(
             backend: .whisperCPPCLI,
@@ -62,9 +63,14 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
             activeBackend: configuration.preferredBackend
         )
 
+        if let blockingReason = policyDecision.blockingReason {
+            throw TranscriptionPipelineError.backendUnavailable(blockingReason)
+        }
+
         let installation = installationState(
             discoveredModels: discoveredModels,
-            policyModel: policyDecision.modelToUse
+            policyModel: policyDecision.modelToUse,
+            blockingReason: policyDecision.blockingReason
         )
         guard let executableURL = installation.executableURL else {
             throw TranscriptionPipelineError.backendUnavailable(installation.detail)
@@ -74,10 +80,6 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         }
         guard let normalizationPlan = installation.normalizationPlan else {
             throw TranscriptionPipelineError.backendUnavailable(installation.detail)
-        }
-
-        if let blockingReason = policyDecision.blockingReason {
-            throw TranscriptionPipelineError.backendUnavailable(blockingReason)
         }
 
         let jobDirectoryURL = try makeJobDirectory()
@@ -138,7 +140,8 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
 
     private func installationState(
         discoveredModels: [ManagedLocalModel],
-        policyModel: ManagedLocalModel? = nil
+        policyModel: ManagedLocalModel? = nil,
+        blockingReason: String? = nil
     ) -> WhisperInstallationState {
         let executableURL = locator.locate(
             envKey: "OATMEAL_WHISPER_BINARY_PATH",
@@ -160,22 +163,50 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
             normalizationPlan == nil ? "Install `ffmpeg` or make `afconvert` available so Oatmeal can normalize recordings to 16 kHz WAV." : nil
         ].compactMap { $0 }
 
+        // Prepend the language policy's blocking reason so it leads the
+        // user-facing detail. Phase 5's curated catalog UI will turn this
+        // string into a button; until then, surfacing it via the existing
+        // detail mechanism is enough to make it visible.
+        let blockingPrefix: String? = (blockingReason?.isEmpty == false) ? blockingReason : nil
+
         if detailParts.isEmpty, let executableURL, let model, let normalizationPlan {
+            let baseDetail = "Ready to run locally with \(executableURL.lastPathComponent), model \(model.displayName), and \(normalizationPlan.tool.displayName) audio normalization."
+            if let blockingPrefix {
+                return WhisperInstallationState(
+                    executableURL: executableURL,
+                    model: model,
+                    normalizationPlan: normalizationPlan,
+                    availability: .unavailable,
+                    detail: "\(blockingPrefix) \(baseDetail)"
+                )
+            }
             return WhisperInstallationState(
                 executableURL: executableURL,
                 model: model,
                 normalizationPlan: normalizationPlan,
                 availability: .available,
-                detail: "Ready to run locally with \(executableURL.lastPathComponent), model \(model.displayName), and \(normalizationPlan.tool.displayName) audio normalization."
+                detail: baseDetail
             )
         }
+
+        let combinedDetail: String = {
+            let installationDetail = detailParts.joined(separator: " ")
+            switch (blockingPrefix, installationDetail.isEmpty) {
+            case let (reason?, false):
+                return "\(reason) \(installationDetail)"
+            case let (reason?, true):
+                return reason
+            case (nil, _):
+                return installationDetail
+            }
+        }()
 
         return WhisperInstallationState(
             executableURL: executableURL,
             model: model,
             normalizationPlan: normalizationPlan,
             availability: .unavailable,
-            detail: detailParts.joined(separator: " ")
+            detail: combinedDetail
         )
     }
 

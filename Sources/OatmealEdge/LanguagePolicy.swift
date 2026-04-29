@@ -10,8 +10,8 @@ import OatmealCore
 /// that should be surfaced to the user.
 ///
 /// This is intentionally a pure function with no I/O so it can be exercised
-/// by tabular unit tests. Subsequent tickets layer auto-routing across `.en`
-/// and multilingual variants and `.en` blocking on top of the same shape.
+/// by tabular unit tests. Phase 3 layers auto-routing across `.en` and
+/// multilingual variants and `.en` blocking on top of the same shape.
 public struct LanguagePolicy {
     public struct Decision: Equatable {
         public let whisperLanguageArg: String
@@ -38,9 +38,103 @@ public struct LanguagePolicy {
         activeBackend: TranscriptionBackendPreference
     ) -> Decision {
         _ = activeBackend // reserved for richer routing in subsequent tickets
+
+        let languageArg = whisperLanguageArgument(for: configuredLocale)
+        let whisperModels = discoveredModels.filter { $0.kind == .whisper }
+
+        // No models discovered at all: the existing model-missing error in
+        // `WhisperCPPTranscriptionBackend.installationState(...)` covers this
+        // case, so the policy intentionally does not double-handle it.
+        guard !whisperModels.isEmpty else {
+            return Decision(
+                whisperLanguageArg: languageArg,
+                modelToUse: nil,
+                isDegraded: false,
+                blockingReason: nil
+            )
+        }
+
+        let englishOnlyModels = whisperModels.filter { $0.variant == .englishOnly }
+        let multilingualModels = whisperModels.filter { $0.variant != .englishOnly }
+
+        if languageArg == "auto" {
+            if let preferred = preferredModel(in: multilingualModels) {
+                return Decision(
+                    whisperLanguageArg: "auto",
+                    modelToUse: preferred,
+                    isDegraded: false,
+                    blockingReason: nil
+                )
+            }
+
+            if !englishOnlyModels.isEmpty {
+                return Decision(
+                    whisperLanguageArg: "auto",
+                    modelToUse: preferredModel(in: englishOnlyModels),
+                    isDegraded: true,
+                    blockingReason: "Auto-detect requires a multilingual Whisper model. Download a multilingual model in Settings to enable auto-detect."
+                )
+            }
+
+            // Whisper models exist but none have classification info (only
+            // possible with synthetic fixtures). Fall back to the first.
+            return Decision(
+                whisperLanguageArg: "auto",
+                modelToUse: preferredModel(in: whisperModels),
+                isDegraded: false,
+                blockingReason: nil
+            )
+        }
+
+        if languageArg == "en" {
+            if let preferred = preferredModel(in: englishOnlyModels) {
+                return Decision(
+                    whisperLanguageArg: "en",
+                    modelToUse: preferred,
+                    isDegraded: false,
+                    blockingReason: nil
+                )
+            }
+
+            if let preferred = preferredModel(in: multilingualModels) {
+                return Decision(
+                    whisperLanguageArg: "en",
+                    modelToUse: preferred,
+                    isDegraded: false,
+                    blockingReason: nil
+                )
+            }
+
+            return Decision(
+                whisperLanguageArg: "en",
+                modelToUse: preferredModel(in: whisperModels),
+                isDegraded: false,
+                blockingReason: nil
+            )
+        }
+
+        // Specific non-English language.
+        if let preferred = preferredModel(in: multilingualModels) {
+            return Decision(
+                whisperLanguageArg: languageArg,
+                modelToUse: preferred,
+                isDegraded: false,
+                blockingReason: nil
+            )
+        }
+
+        if !englishOnlyModels.isEmpty {
+            return Decision(
+                whisperLanguageArg: languageArg,
+                modelToUse: preferredModel(in: englishOnlyModels),
+                isDegraded: true,
+                blockingReason: "Whisper's English-only model cannot transcribe \(languageArg). Download a multilingual model in Settings."
+            )
+        }
+
         return Decision(
-            whisperLanguageArg: whisperLanguageArgument(for: configuredLocale),
-            modelToUse: discoveredModels.first,
+            whisperLanguageArg: languageArg,
+            modelToUse: preferredModel(in: whisperModels),
             isDegraded: false,
             blockingReason: nil
         )
@@ -66,5 +160,28 @@ public struct LanguagePolicy {
         }
 
         return String(trimmed.prefix(2)).lowercased()
+    }
+
+    /// Picks the smallest-tier Whisper model from the provided list, breaking
+    /// ties alphabetically by `displayName`. Models with `nil` `sizeTier`
+    /// (synthetic fixtures that never went through filename classification)
+    /// sort last so real, classified inventory always wins.
+    private static func preferredModel(in models: [ManagedLocalModel]) -> ManagedLocalModel? {
+        guard !models.isEmpty else { return nil }
+        return models.sorted { lhs, rhs in
+            switch (lhs.sizeTier, rhs.sizeTier) {
+            case let (lhsTier?, rhsTier?):
+                if lhsTier != rhsTier {
+                    return lhsTier < rhsTier
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+        }.first
     }
 }

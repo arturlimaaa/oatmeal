@@ -40,11 +40,14 @@ struct LocalModelInventory: Sendable {
                     return nil
                 }
 
+                let classification = WhisperModelClassifier.classify(filename: url.lastPathComponent)
                 return ManagedLocalModel(
                     kind: .whisper,
                     displayName: url.deletingPathExtension().lastPathComponent,
                     fileURL: url,
-                    sizeBytes: values?.fileSize.map(Int64.init)
+                    sizeBytes: values?.fileSize.map(Int64.init),
+                    variant: classification.variant,
+                    sizeTier: classification.sizeTier
                 )
             }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
