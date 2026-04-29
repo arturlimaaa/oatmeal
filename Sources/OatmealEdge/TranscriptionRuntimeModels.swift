@@ -134,15 +134,22 @@ public struct TranscriptionRequest: Sendable {
     public var audioFileURL: URL
     public var startedAt: Date?
     public var preferredLocaleIdentifier: String?
+    /// When set, the Whisper backend writes its 16 kHz mono normalized WAV to
+    /// this URL rather than to a per-job temp directory that is deleted after
+    /// the run. The caller (typically `AudioRetentionCoordinator`) owns the
+    /// lifetime of the file at this path.
+    public var normalizedOutputURL: URL?
 
     public init(
         audioFileURL: URL,
         startedAt: Date? = nil,
-        preferredLocaleIdentifier: String? = nil
+        preferredLocaleIdentifier: String? = nil,
+        normalizedOutputURL: URL? = nil
     ) {
         self.audioFileURL = audioFileURL
         self.startedAt = startedAt
         self.preferredLocaleIdentifier = preferredLocaleIdentifier
+        self.normalizedOutputURL = normalizedOutputURL
     }
 }
 

@@ -25,6 +25,7 @@ final class AppViewModel {
     private let summaryModelManager: any LocalSummaryModelManaging
     private let assistantService: any SingleMeetingAssistantServicing
     private let persistence: AppPersistence
+    private let audioRetentionCoordinator: AudioRetentionCoordinator
     private let nowProvider: () -> Date
     private let liveTranscriptionPollingIntervalNanoseconds: UInt64
     @ObservationIgnored private var processingTasks: [MeetingNote.ID: Task<Void, Never>] = [:]
@@ -108,6 +109,10 @@ final class AppViewModel {
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
         self.assistantService = assistantService ?? GroundedSingleMeetingAssistantService()
+        self.audioRetentionCoordinator = AudioRetentionCoordinator(
+            recordingsDirectoryURL: persistence.applicationSupportDirectoryURL
+                .appendingPathComponent("Recordings", isDirectory: true)
+        )
 
         restorePersistedState()
         refresh()
@@ -613,6 +618,7 @@ final class AppViewModel {
         processingTasks[id] = nil
 
         try? captureEngine.deleteRecording(for: id)
+        try? audioRetentionCoordinator.apply(.noteDeleted(noteID: id))
         store.delete(noteID: id)
         refresh()
 
@@ -625,6 +631,50 @@ final class AppViewModel {
         }
 
         persistState()
+    }
+
+    /// Re-runs transcription against a note's retained normalized WAV using
+    /// a caller-provided language. Updates the note's `language` and appends
+    /// a new `NoteTranscriptionAttempt` to `transcriptionHistory`. Throws
+    /// `TranscriptionPipelineError.fileNotFound` when the note has no
+    /// retained WAV (legacy notes, or notes whose audio has been deleted).
+    ///
+    /// This API is programmatic-only in this milestone; the note-detail UI
+    /// override-and-re-transcribe affordance is wired up in a later phase.
+    @discardableResult
+    func reTranscribe(noteID: MeetingNote.ID, language: String) async throws -> TranscriptionJobResult {
+        guard let retainedWAVURL = audioRetentionCoordinator.retainedWAVURL(for: noteID) else {
+            throw TranscriptionPipelineError.fileNotFound
+        }
+
+        let result = try await transcriptionService.reTranscribe(
+            noteID: noteID,
+            language: language,
+            retainedWAVURL: retainedWAVURL,
+            configuration: transcriptionConfiguration
+        )
+
+        if var note = store.note(id: noteID) {
+            let updatedAt = nowProvider()
+            note.transcriptionHistory.append(
+                NoteTranscriptionAttempt(
+                    backend: result.backend,
+                    executionKind: result.executionKind,
+                    requestedAt: updatedAt,
+                    completedAt: updatedAt,
+                    status: .succeeded,
+                    segmentCount: result.segments.count,
+                    warningMessages: result.warningMessages,
+                    language: language
+                )
+            )
+            note.transcriptSegments = result.segments
+            note.language = result.detectedLanguage ?? language
+            note.updatedAt = updatedAt
+            persist(note)
+        }
+
+        return result
     }
 
     func loadSystemState() async {
@@ -1963,11 +2013,17 @@ final class AppViewModel {
                         throw PostCaptureProcessingError.missingRecordingArtifact(request.noteID)
                     }
 
+                    _ = try? audioRetentionCoordinator.prepareNormalizedDirectory()
+                    let normalizedOutputURL = audioRetentionCoordinator
+                        .paths(for: request.noteID)
+                        .normalizedWAVURL
+
                     let result = try await transcriptionService.transcribe(
                         request: TranscriptionRequest(
                             audioFileURL: recordingURL,
                             startedAt: request.captureStartedAt ?? request.processingAnchorDate,
-                            preferredLocaleIdentifier: transcriptionConfiguration.preferredLocaleIdentifier
+                            preferredLocaleIdentifier: transcriptionConfiguration.preferredLocaleIdentifier,
+                            normalizedOutputURL: normalizedOutputURL
                         ),
                         configuration: transcriptionConfiguration
                     )
@@ -2255,8 +2311,8 @@ final class AppViewModel {
         }
 
         do {
-            try captureEngine.deleteRecording(for: note.id)
-            statusMessages.append("Local recording artifact was cleaned up after successful processing.")
+            try audioRetentionCoordinator.apply(.normalizationSucceeded(noteID: note.id))
+            statusMessages.append("Original recording was cleaned up after successful processing. A normalized copy was retained for re-transcribe.")
         } catch {
             statusMessages.append("Processing succeeded, but Oatmeal could not clean up the saved recording: \(error.localizedDescription)")
         }

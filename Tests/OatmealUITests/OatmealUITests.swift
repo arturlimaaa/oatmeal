@@ -65,12 +65,15 @@ final class OatmealUITests: XCTestCase {
         XCTAssertTrue(completed)
         XCTAssertEqual(model.selectedNote?.transcriptSegments.count, 1)
         XCTAssertNotNil(model.selectedNote?.enhancedNote)
-        XCTAssertNil(model.recordingURL(for: model.selectedNote!))
+        // Post-success cleanup now flows through `AudioRetentionCoordinator`,
+        // not `MeetingCaptureEngineServing.deleteRecording`. The coordinator
+        // deletes the original `.caf`/`.mp4` and the live-chunk directory on
+        // disk while preserving the normalized 16 kHz WAV for re-transcribe.
+        // The capture engine stub no longer records this cleanup.
 
         let stats = await transcriptionService.stats()
         XCTAssertEqual(stats.executionPlanCalls, 1)
         XCTAssertEqual(stats.transcribeCalls, 1)
-        XCTAssertEqual(captureEngine.deletedNoteIDs, [note.id])
     }
 
     func testStartingCaptureBeginsPersistedLiveSession() async throws {
@@ -1160,11 +1163,13 @@ final class OatmealUITests: XCTestCase {
 
         XCTAssertTrue(completed)
         XCTAssertEqual(model.selectedNote?.transcriptSegments.first?.text, "Retry succeeded from the retained artifact.")
-        XCTAssertNil(model.recordingURL(for: model.selectedNote!))
+        // Post-success cleanup now flows through `AudioRetentionCoordinator`,
+        // not `MeetingCaptureEngineServing.deleteRecording`. The coordinator
+        // owns the deletion of originals and the retention of the normalized
+        // WAV; the capture engine stub no longer records this cleanup.
 
         let stats = await transcriptionService.stats()
         XCTAssertEqual(stats.transcribeCalls, 1)
-        XCTAssertEqual(captureEngine.deletedNoteIDs, [noteID])
     }
 
     func testSummaryConfigurationPersistsAndRestores() async throws {

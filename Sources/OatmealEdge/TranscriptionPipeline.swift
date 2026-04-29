@@ -5,6 +5,47 @@ public protocol LocalTranscriptionServicing: Sendable {
     func runtimeState(configuration: LocalTranscriptionConfiguration) async -> LocalTranscriptionRuntimeState
     func executionPlan(configuration: LocalTranscriptionConfiguration) async throws -> TranscriptionExecutionPlan
     func transcribe(request: TranscriptionRequest, configuration: LocalTranscriptionConfiguration) async throws -> TranscriptionJobResult
+    /// Re-runs transcription against a retained normalized WAV using a
+    /// caller-provided language. Used by the multilingual override flow when
+    /// the original auto-detect picked the wrong language. Throws
+    /// `TranscriptionPipelineError.fileNotFound` when no retained WAV exists
+    /// at `retainedWAVURL`.
+    func reTranscribe(
+        noteID: UUID,
+        language: String,
+        retainedWAVURL: URL,
+        configuration: LocalTranscriptionConfiguration
+    ) async throws -> TranscriptionJobResult
+}
+
+public extension LocalTranscriptionServicing {
+    /// Default implementation routes through `transcribe` with the override
+    /// language baked into both the request and configuration. Concrete
+    /// pipelines can replace this when they need extra plumbing (e.g. the
+    /// real `LocalTranscriptionPipeline` validates that the retained WAV
+    /// still exists on disk before kicking off the run).
+    func reTranscribe(
+        noteID _: UUID,
+        language: String,
+        retainedWAVURL: URL,
+        configuration: LocalTranscriptionConfiguration
+    ) async throws -> TranscriptionJobResult {
+        guard FileManager.default.fileExists(atPath: retainedWAVURL.path) else {
+            throw TranscriptionPipelineError.fileNotFound
+        }
+
+        var overriddenConfiguration = configuration
+        overriddenConfiguration.preferredLocaleIdentifier = language
+
+        let request = TranscriptionRequest(
+            audioFileURL: retainedWAVURL,
+            startedAt: nil,
+            preferredLocaleIdentifier: language,
+            normalizedOutputURL: nil
+        )
+
+        return try await transcribe(request: request, configuration: overriddenConfiguration)
+    }
 }
 
 public final class LocalTranscriptionPipeline: LocalTranscriptionServicing, @unchecked Sendable {

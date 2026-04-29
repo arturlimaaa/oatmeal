@@ -297,7 +297,7 @@ struct OatmealMenuBarContent: View {
             Image(systemName: "lock.fill")
                 .font(.system(size: 10))
                 .foregroundStyle(Color.om.ink3)
-            Text("Audio stays on this Mac. Transcribing locally.")
+            Text("Audio stays on this Mac. Original recording is deleted after transcription; a compressed copy is retained locally for re-processing.")
                 .font(.om.caption)
                 .foregroundStyle(Color.om.ink3)
         }

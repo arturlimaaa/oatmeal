@@ -81,10 +81,14 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         }
 
         let jobDirectoryURL = try makeJobDirectory()
+        // The job directory holds whisper.cpp's intermediate JSON output. The
+        // normalized WAV lives outside this directory when the caller supplied
+        // a stable retention path so deleting the job directory after the run
+        // does not destroy the artifact reused for re-transcribe.
         defer {
             try? FileManager.default.removeItem(at: jobDirectoryURL)
         }
-        let normalizedURL = jobDirectoryURL.appendingPathComponent("normalized.wav")
+        let normalizedURL = request.normalizedOutputURL ?? jobDirectoryURL.appendingPathComponent("normalized.wav")
         let outputPrefixURL = jobDirectoryURL.appendingPathComponent("transcript")
 
         try normalizer.normalize(inputURL: request.audioFileURL, outputURL: normalizedURL)
