@@ -3,6 +3,29 @@ import SwiftUI
 
 struct OatmealSettingsView: View {
     private static let automaticSummaryModelSelection = "__automatic_summary_model__"
+    private static let autoDetectLanguageSelection = "__auto_detect_language__"
+
+    /// Curated list of primary BCP 47 languages offered in the picker.
+    /// Display name shown to the user, identifier persisted to
+    /// `LocalTranscriptionConfiguration.preferredLocaleIdentifier`.
+    // TODO(multilingual): regional variants
+    static let curatedTranscriptionLanguages: [(identifier: String, displayName: String)] = [
+        ("en", "English"),
+        ("es", "Spanish"),
+        ("pt", "Portuguese"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("nl", "Dutch"),
+        ("pl", "Polish"),
+        ("ru", "Russian"),
+        ("tr", "Turkish"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("zh", "Chinese"),
+        ("ar", "Arabic"),
+        ("hi", "Hindi")
+    ]
 
     @Environment(AppViewModel.self) private var model
     @AppStorage("launchAtLogin") private var launchAtLogin = false
@@ -105,6 +128,33 @@ struct OatmealSettingsView: View {
                     ForEach(TranscriptionExecutionPolicy.allCases, id: \.self) { policy in
                         Text(policy.displayName).tag(policy)
                     }
+                }
+
+                Picker(
+                    "Transcription language",
+                    selection: Binding(
+                        get: { transcriptionLanguageSelection() },
+                        set: { selection in
+                            model.setTranscriptionPreferredLocaleIdentifier(
+                                selection == Self.autoDetectLanguageSelection ? nil : selection
+                            )
+                        }
+                    )
+                ) {
+                    Text("Auto-detect").tag(Self.autoDetectLanguageSelection)
+                    ForEach(Self.curatedTranscriptionLanguages, id: \.identifier) { entry in
+                        Text(entry.displayName).tag(entry.identifier)
+                    }
+                }
+
+                Text("Auto-detect is slower than locking a single language and requires a multilingual Whisper model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if appleSpeechIsActiveBackend, model.transcriptionConfiguration.preferredLocaleIdentifier == nil {
+                    Text("Auto-detect requires Whisper. Apple Speech will run in the system locale instead.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if let runtimeState = model.transcriptionRuntimeState {
@@ -301,6 +351,35 @@ struct OatmealSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
+    }
+
+    /// Returns the picker tag that should appear visually selected.
+    ///
+    /// The user has explicitly chosen "Auto-detect" when
+    /// `preferredLocaleIdentifier` is `nil`. We honour that choice rather than
+    /// silently mapping it to the system locale's primary language: the issue
+    /// allows showing "Auto-detect" as the visible default and the picker UX
+    /// is clearer when the explicit choice round-trips visibly.
+    private func transcriptionLanguageSelection() -> String {
+        guard let localeIdentifier = model.transcriptionConfiguration.preferredLocaleIdentifier else {
+            return Self.autoDetectLanguageSelection
+        }
+
+        let primary = LanguagePolicy.whisperLanguageArgument(for: localeIdentifier)
+        if let match = Self.curatedTranscriptionLanguages.first(where: { $0.identifier == primary }) {
+            return match.identifier
+        }
+        return Self.autoDetectLanguageSelection
+    }
+
+    /// True when the runtime resolved Apple Speech as the active backend
+    /// (typically because Whisper is unavailable). Used to surface the
+    /// auto-detect-requires-Whisper hint inline.
+    private var appleSpeechIsActiveBackend: Bool {
+        guard let summary = model.transcriptionRuntimeState?.activePlanSummary else {
+            return false
+        }
+        return summary.localizedCaseInsensitiveContains("Apple Speech")
     }
 
     private func preferredSummaryModelSelection(for runtimeState: LocalSummaryRuntimeState) -> String {

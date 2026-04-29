@@ -11,6 +11,7 @@ struct AppleSpeechTranscriptionBackend: AppleSpeechTranscriptionServing {
     func status(preferredLocaleIdentifier: String?) -> TranscriptionBackendStatus {
         let recognizer = makeRecognizer(localeIdentifier: preferredLocaleIdentifier)
         let authorizationStatus = SFSpeechRecognizer.authorizationStatus()
+        let isAutoDetect = (preferredLocaleIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         guard recognizer != nil else {
             return TranscriptionBackendStatus(
@@ -25,6 +26,16 @@ struct AppleSpeechTranscriptionBackend: AppleSpeechTranscriptionServing {
         switch authorizationStatus {
         case .authorized:
             let isAvailable = recognizer?.isAvailable == true
+            if isAvailable, isAutoDetect {
+                let systemLocaleIdentifier = Locale.current.identifier
+                return TranscriptionBackendStatus(
+                    backend: .appleSpeech,
+                    displayName: "Apple Speech",
+                    availability: .degraded,
+                    detail: "Auto-detect requires Whisper. Apple Speech will run in the system locale (\(systemLocaleIdentifier)).",
+                    isRunnable: true
+                )
+            }
             return TranscriptionBackendStatus(
                 backend: .appleSpeech,
                 displayName: "Apple Speech",

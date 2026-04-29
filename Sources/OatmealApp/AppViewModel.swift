@@ -995,6 +995,17 @@ final class AppViewModel {
         }
     }
 
+    func setTranscriptionPreferredLocaleIdentifier(_ localeIdentifier: String?) {
+        let normalized = localeIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        transcriptionConfiguration.preferredLocaleIdentifier = normalized
+        persistState()
+        Task {
+            await refreshTranscriptionRuntimeState()
+        }
+    }
+
     func setSummaryBackendPreference(_ preference: SummaryBackendPreference) {
         summaryConfiguration.preferredBackend = preference
         persistState()
