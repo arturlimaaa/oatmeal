@@ -34,7 +34,10 @@ let package = Package(
         .target(
             name: "OatmealUI",
             dependencies: ["OatmealCore", "OatmealEdge"],
-            path: "Sources/OatmealApp"
+            path: "Sources/OatmealApp",
+            resources: [
+                .process("Resources")
+            ]
         ),
         .testTarget(
             name: "OatmealCoreTests",

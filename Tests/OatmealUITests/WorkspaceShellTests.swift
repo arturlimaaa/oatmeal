@@ -150,4 +150,27 @@ final class WorkspaceShellTests: AIWorkspaceTestCase {
         XCTAssertEqual(model.selectedNoteID, secondID)
         XCTAssertEqual(model.selectedNoteWorkspaceMode, .notes)
     }
+
+    func testShortRecordingStopWarningLogicOnlyTriggersUnderFiveMinutes() {
+        let noteID = UUID(uuidString: "F5000000-0000-0000-0000-000000000001")!
+        var note = MeetingNote(
+            id: noteID,
+            title: "Short Capture",
+            origin: .quickNote(createdAt: date(1_700_404_000))
+        )
+        note.captureState.beginCapture(at: date(1_700_404_000))
+
+        let persistence = makePersistence()
+        defer { removePersistenceArtifacts(persistence) }
+
+        let model = makeModel(
+            notes: [note],
+            persistence: persistence,
+            assistantService: StubSingleMeetingAssistantService(mode: .success("Unused")),
+            nowProvider: { self.date(1_700_404_100) }
+        )
+
+        XCTAssertTrue(model.shouldWarnBeforeStoppingCapture(for: noteID, referenceDate: date(1_700_404_100)))
+        XCTAssertFalse(model.shouldWarnBeforeStoppingCapture(for: noteID, referenceDate: date(1_700_404_301)))
+    }
 }

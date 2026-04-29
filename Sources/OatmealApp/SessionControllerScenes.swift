@@ -5,6 +5,7 @@ enum OatmealSceneID {
     static let main = "oatmeal-main"
     static let sessionController = "oatmeal-session-controller"
     static let meetingDetectionPrompt = "oatmeal-meeting-detection-prompt"
+    static let onboarding = "oatmeal-onboarding"
 }
 
 struct OatmealMenuBarContent: View {
@@ -24,242 +25,328 @@ struct OatmealMenuBarContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             if let state = model.menuBarSessionState {
-                sessionSummary(state)
-                if let detectionState = model.menuBarMeetingDetectionState,
-                   detectionState.phase == .endSuggestion {
-                    Divider()
-                    detectionSummary(detectionState)
+                recordingHeader(state)
+                recordingWaveform
+                recordingSourceCards
+                recordingControls(state)
+                if let end = endSuggestionState {
+                    endSuggestionHint(end)
                 }
+                quietTail
             } else if let detectionState = model.menuBarMeetingDetectionState {
-                detectionSummary(detectionState)
+                detectionHeader(detectionState)
+                detectionBody(detectionState)
+                detectionControls(detectionState)
+                quietTail
             } else {
-                idleSummary
+                idleHeader
+                idleControls
             }
+            OMHairline()
+            localGuaranteeFooter
+        }
+        .frame(width: 340, alignment: .leading)
+        .background(Color.om.paper.opacity(0.86))
+    }
 
-            Divider()
+    /// Two ring-tinted cards that show what Oatmeal is capturing right now:
+    /// the mic on the left, system audio on the right. Each card has a mini
+    /// waveform — a visual cue that the channel is live.
+    private var recordingSourceCards: some View {
+        HStack(spacing: 8) {
+            sourceCard(icon: "mic.fill", title: "Mic", subtitle: "You")
+            sourceCard(icon: "speaker.wave.2.fill", title: "System", subtitle: "Others")
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Button("Open Oatmeal") {
-                    _ = router.openMainWindow()
+    private func sourceCard(icon: String, title: String, subtitle: String) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.om.ring)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.om.ink)
+                Text(subtitle)
+                    .font(.om.meta)
+                    .foregroundStyle(Color.om.ink3)
+            }
+            Spacer(minLength: 4)
+            OMWaveform(barCount: 4, tint: Color.om.ring)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.om.ring.opacity(0.06))
+        .overlay(
+            RoundedRectangle(cornerRadius: OMRadius.sm)
+                .strokeBorder(Color.om.ring.opacity(0.14), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: OMRadius.sm))
+    }
+
+    private var endSuggestionState: MeetingDetectionPromptState? {
+        guard let detection = model.menuBarMeetingDetectionState,
+              detection.phase == .endSuggestion else {
+            return nil
+        }
+        return detection
+    }
+
+    // MARK: Recording
+
+    private func recordingHeader(_ state: SessionControllerState) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            OMRecDot()
+            Text(recordingLabel(for: state))
+                .font(.om.body)
+                .foregroundStyle(Color.om.ink)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(state.elapsedText() ?? "--:--")
+                    .font(.om.meta)
+                    .monospacedDigit()
+                    .foregroundStyle(Color.om.ink3)
+            }
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.top, OMSpacing.s3)
+        .padding(.bottom, OMSpacing.s2)
+    }
+
+    private var recordingWaveform: some View {
+        RecorderWaveformBar()
+            .padding(.horizontal, OMSpacing.s4)
+            .padding(.bottom, OMSpacing.s3)
+    }
+
+    private func recordingControls(_ state: SessionControllerState) -> some View {
+        HStack(alignment: .center, spacing: OMSpacing.s2) {
+            OMButton(variant: .secondary) {
+                _ = router.openMainWindow(openTranscript: true)
+            } label: {
+                Label("Transcript", systemImage: "text.alignleft")
+                    .labelStyle(.titleOnly)
+            }
+            .disabled(!state.canOpenTranscript)
+
+            if state.canStopCapture {
+                OMButton(variant: .destructive) {
+                    Task { await router.stopCapture() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.fill").font(.system(size: 9))
+                        Text("Stop & save")
+                    }
                 }
+            }
+            Spacer(minLength: 0)
+            OMKbd("⌘⇧9")
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
 
-                if let controllerState = model.sessionControllerState {
-                    if let detectionState = model.menuBarMeetingDetectionState,
-                       detectionState.phase == .endSuggestion {
-                        Button(detectionState.primaryActionTitle, role: .destructive) {
-                            Task {
-                                await router.startPendingMeetingDetection()
-                            }
-                        }
+    // MARK: Detection
 
-                        if let secondaryActionTitle = detectionState.secondaryActionTitle {
-                            Button(secondaryActionTitle) {
-                                router.ignorePendingMeetingDetection()
-                            }
-                        }
-                    }
+    private func detectionHeader(_ state: MeetingDetectionPromptState) -> some View {
+        HStack(alignment: .center, spacing: OMSpacing.s2) {
+            OatLeafMark(size: 16, tint: Color.om.oat2)
+            Text(state.headline)
+                .font(.om.body)
+                .foregroundStyle(Color.om.ink)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.top, OMSpacing.s3)
+        .padding(.bottom, OMSpacing.s1)
+    }
 
-                    Button("Reopen Session Controller") {
-                        router.reopenSessionController()
-                    }
+    private func detectionBody(_ state: MeetingDetectionPromptState) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(state.title)
+                .font(.om.sectionTitle)
+                .foregroundStyle(Color.om.ink)
+                .lineLimit(2)
+            Text(state.menuBarSummary)
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
 
-                    Button("Open Live Transcript") {
-                        _ = router.openMainWindow(openTranscript: true)
-                    }
-                    .disabled(!controllerState.canOpenTranscript)
+    private func detectionControls(_ state: MeetingDetectionPromptState) -> some View {
+        HStack(alignment: .center, spacing: OMSpacing.s2) {
+            OMButton(state.primaryActionTitle, variant: .primary) {
+                Task { await router.startPendingMeetingDetection() }
+            }
+            if let secondary = state.secondaryActionTitle {
+                OMButton(secondary, variant: .secondary) {
+                    router.ignorePendingMeetingDetection()
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
 
-                    if controllerState.canStopCapture {
-                        Button("Stop Capture", role: .destructive) {
-                            Task {
-                                await router.stopCapture()
-                            }
-                        }
-                    }
-                } else if let state = model.menuBarSessionState {
-                    Button("Open Live Transcript") {
-                        _ = router.openMainWindow(openTranscript: true)
-                    }
-                    .disabled(!state.canOpenTranscript)
+    // MARK: End-suggestion inline hint
 
-                    Button("Start Quick Note") {
-                        Task {
-                            await router.startQuickNoteCapture()
-                        }
-                    }
-                } else if let detectionState = model.menuBarMeetingDetectionState {
-                    Button(detectionState.primaryActionTitle) {
-                        Task {
-                            await router.startPendingMeetingDetection()
-                        }
-                    }
-
-                    if model.detectionPromptState != nil {
-                        Button("Not now") {
-                            router.ignorePendingMeetingDetection()
-                        }
-                    }
-
-                    Button("Start Quick Note") {
-                        Task {
-                            await router.startQuickNoteCapture()
-                        }
-                    }
-                } else {
-                    Button("Start Quick Note") {
-                        Task {
-                            await router.startQuickNoteCapture()
-                        }
+    private func endSuggestionHint(_ state: MeetingDetectionPromptState) -> some View {
+        VStack(alignment: .leading, spacing: OMSpacing.s2) {
+            Text(state.headline.uppercased())
+                .font(.om.eyebrow)
+                .tracking(1.8)
+                .foregroundStyle(Color.om.ember)
+            Text(state.menuBarSummary)
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: OMSpacing.s2) {
+                OMButton(state.primaryActionTitle, variant: .destructive) {
+                    Task { await router.startPendingMeetingDetection() }
+                }
+                if let secondary = state.secondaryActionTitle {
+                    OMButton(secondary, variant: .secondary) {
+                        router.ignorePendingMeetingDetection()
                     }
                 }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(OMSpacing.s3)
+        .background(
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .fill(Color.om.ember.opacity(0.08))
+        )
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
+
+    // MARK: Quiet tail — secondary affordance that exists in every non-idle state
+
+    private var quietTail: some View {
+        HStack(spacing: 0) {
+            Button {
+                _ = router.openMainWindow()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Open Oatmeal")
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 9))
+                }
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink3)
             }
             .buttonStyle(.plain)
+            Spacer(minLength: 0)
         }
-        .padding(14)
-        .frame(width: 320, alignment: .leading)
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
     }
 
-    @ViewBuilder
-    private func sessionSummary(_ state: SessionControllerState) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Label {
-                    Text(state.menuBarSectionTitle)
-                        .font(.headline)
-                } icon: {
-                    Image(systemName: state.menuBarSymbolName)
-                        .foregroundStyle(color(for: state.tone))
-                }
+    // MARK: Idle
 
-                Spacer()
-
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    if let elapsedText = state.elapsedText() {
-                        Text(elapsedText)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            Text(state.title)
-                .font(.title3.weight(.semibold))
-                .lineLimit(2)
-
-            Text(state.menuBarSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 8) {
-                Image(systemName: state.controllerStatusSymbolName)
-                    .foregroundStyle(color(for: state.tone))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(state.controllerStatusTitle)
-                        .font(.caption.weight(.semibold))
-                    if let lifecycleText = state.lifecycleTimestampText() {
-                        Text(lifecycleText)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                SessionControllerBadge(
-                    title: "Session",
-                    value: state.healthLabel,
-                    tone: state.tone
-                )
-
-                SessionControllerBadge(
-                    title: "Capture",
-                    value: state.captureLabel,
-                    tone: state.kind == .processing ? .neutral : state.tone
-                )
-            }
+    private var idleHeader: some View {
+        HStack(alignment: .center, spacing: OMSpacing.s2) {
+            OatLeafMark(size: 18, tint: Color.om.ink)
+            Text("Oatmeal")
+                .font(.om.sectionTitle)
+                .foregroundStyle(Color.om.ink)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.top, OMSpacing.s3)
+        .padding(.bottom, OMSpacing.s1)
     }
 
-    private func detectionSummary(_ state: MeetingDetectionPromptState) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label {
-                Text(state.headline)
-                    .font(.headline)
-            } icon: {
-                Image(systemName: state.symbolName)
-                    .foregroundStyle(state.phase == .endSuggestion ? .pink : .orange)
-            }
-
-            Text(state.title)
-                .font(.title3.weight(.semibold))
-                .lineLimit(2)
-
-            Text(state.menuBarSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 8) {
-                SessionControllerBadge(
-                    title: "Source",
-                    value: state.sourceName,
-                    tone: .delayed
-                )
-
-                SessionControllerBadge(
-                    title: "State",
-                    value: detectionStateLabel(for: state),
-                    tone: state.phase == .endSuggestion
-                        ? .failed
-                        : (state.kind == .prompt ? .live : .neutral)
-                )
-            }
-        }
-    }
-
-    private var idleSummary: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label {
-                Text("Oatmeal")
-                    .font(.headline)
-            } icon: {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-
+    private var idleControls: some View {
+        VStack(alignment: .leading, spacing: OMSpacing.s2) {
             Text("No active session")
-                .font(.title3.weight(.semibold))
-
-            Text("Start a Quick Note here, or open the main app to work with calendar-backed meetings and existing notes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink3)
+                .padding(.bottom, OMSpacing.s1)
+            HStack(spacing: OMSpacing.s2) {
+                OMButton("Start recording", variant: .primary) {
+                    Task { await router.startQuickNoteCapture() }
+                }
+                OMButton("Open Oatmeal", variant: .secondary) {
+                    _ = router.openMainWindow()
+                }
+                Spacer(minLength: 0)
+            }
         }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
     }
 
-    private func color(for tone: SessionControllerState.Tone) -> Color {
-        switch tone {
-        case .live:
-            .red
-        case .delayed:
-            .orange
-        case .recovered:
-            .blue
-        case .failed:
-            .pink
-        case .neutral:
-            .secondary
+    // MARK: Footer
+
+    private var localGuaranteeFooter: some View {
+        HStack(spacing: OMSpacing.s1 + 2) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(Color.om.ink3)
+            Text("Audio stays on this Mac. Transcribing locally.")
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink3)
         }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.vertical, OMSpacing.s2 + 2)
     }
 
-    private func detectionStateLabel(for state: MeetingDetectionPromptState) -> String {
-        if state.phase == .endSuggestion {
-            return state.kind == .prompt ? "Stop hint" : "Passive hint"
-        }
+    // MARK: Copy
 
-        return state.kind == .prompt ? "Prompting" : "Passive"
+    private func recordingLabel(for state: SessionControllerState) -> String {
+        let prefix = state.kind == .processing ? "Wrapping up" : "Recording"
+        return "\(prefix) · \(state.title)"
+    }
+}
+
+/// 60-bar decorative waveform for the top of the recorder popover. Bars are
+/// shaped to read as a recent audio signal — recent samples on the right feel
+/// "live," older samples on the left feel settled.
+private struct RecorderWaveformBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: reduceMotion)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            GeometryReader { geo in
+                HStack(alignment: .center, spacing: 1.5) {
+                    ForEach(0..<60, id: \.self) { i in
+                        let frac = Double(i) / 60.0
+                        let phase = t * 1.8 + Double(i) * 0.23
+                        let base = abs(sin(phase)) * (0.4 + frac * 0.7)
+                        let h = reduceMotion ? 10.0 : 4.0 + base * 22.0
+                        Capsule()
+                            .fill(i < 46 ? Color.om.ink2 : Color.om.ink4)
+                            .frame(width: max(1.5, (geo.size.width - 60 * 1.5) / 60), height: h)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+        .frame(height: 40)
+        .background(
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .fill(Color.om.oat.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: OMRadius.md)
+                        .strokeBorder(Color.om.ring.opacity(0.12), lineWidth: 1)
+                )
+        )
+        .accessibilityHidden(true)
     }
 }
 
@@ -327,9 +414,29 @@ struct MeetingDetectionPromptWindowRootView: View {
 }
 
 private struct FloatingSessionControllerView: View {
+    private enum RecorderMeetingTab: String, CaseIterable, Identifiable {
+        case scratchpad
+        case transcript
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .scratchpad:
+                "Scratchpad"
+            case .transcript:
+                "Transcript"
+            }
+        }
+    }
+
     @Environment(AppViewModel.self) private var model
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedTab: RecorderMeetingTab = .scratchpad
+    @State private var selectedMicrophoneID: String?
+    @State private var recorderMessage: String?
+    @State private var isStopWarningPresented = false
 
     private var coordinator: SessionControllerSceneCoordinator {
         SessionControllerSceneCoordinator(
@@ -350,97 +457,119 @@ private struct FloatingSessionControllerView: View {
         model.notes.first(where: { $0.id == state.noteID })
     }
 
+    private var availableMicrophones: [CaptureInputDevice] {
+        model.availableMicrophones()
+    }
+
+    private var scratchpadBinding: Binding<String> {
+        Binding(
+            get: { currentNote?.scratchpad ?? "" },
+            set: { model.replaceScratchpad($0, for: state.noteID) }
+        )
+    }
+
     let state: SessionControllerState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isCollapsed ? 10 : 16) {
+        VStack(alignment: .leading, spacing: isCollapsed ? 10 : 14) {
             if isCollapsed {
                 compactRecorderView
             } else {
                 expandedMeetingView
             }
         }
-        .padding(isCollapsed ? 14 : 18)
+        .padding(isCollapsed ? 12 : 16)
         .frame(
-            minWidth: isCollapsed ? 276 : 372,
-            idealWidth: isCollapsed ? 292 : 404,
-            maxWidth: isCollapsed ? 308 : 428
+            minWidth: isCollapsed ? 276 : 360,
+            idealWidth: isCollapsed ? 292 : 380,
+            maxWidth: isCollapsed ? 308 : 400
         )
         .background(
-            RoundedRectangle(cornerRadius: isCollapsed ? 22 : 24, style: .continuous)
-                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: OMRadius.lg, style: .continuous)
+                .fill(Color.om.paper.opacity(0.96))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: isCollapsed ? 22 : 24, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+            RoundedRectangle(cornerRadius: OMRadius.lg, style: .continuous)
+                .strokeBorder(Color.om.line, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.12), radius: 24, y: 14)
+        .shadow(color: Color.black.opacity(0.18), radius: 22, y: 12)
         .padding(8)
         .animation(.easeInOut(duration: 0.18), value: isCollapsed)
+        .onAppear {
+            refreshLocalState()
+        }
+        .onChange(of: state.noteID) { _, _ in
+            refreshLocalState()
+        }
+        .onChange(of: currentNote?.scratchpad) { _, _ in
+            if recorderMessage != nil {
+                recorderMessage = nil
+            }
+        }
+        .alert("Stop recording?", isPresented: $isStopWarningPresented) {
+            Button("Continue Recording", role: .cancel) {}
+            Button("Stop Anyway", role: .destructive) {
+                Task {
+                    await router.stopCapture()
+                }
+            }
+        } message: {
+            Text("This recording is still under five minutes. Jamie warns that very short captures often produce weaker notes, so Oatmeal is checking before it stops.")
+        }
     }
 
     private var compactRecorderView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                recorderPill
-
-                Spacer(minLength: 0)
-
-                elapsedChip
-
-                surfaceControlButton(
-                    systemImage: "rectangle.expand.vertical",
-                    accessibilityLabel: "Expand Recorder"
-                ) {
-                    model.toggleSessionControllerCollapsed()
-                }
-
-                surfaceControlButton(
-                    systemImage: "xmark",
-                    accessibilityLabel: "Dismiss Recorder"
-                ) {
-                    model.dismissSessionController()
-                    dismiss()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.title)
-                    .font(.headline.weight(.semibold))
-                    .lineLimit(2)
-
-                Text(compactSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            HStack(spacing: 8) {
-                if let firstSource = state.sourceStatuses.first {
-                    SessionControllerMiniBadge(
-                        title: firstSource.title,
-                        value: firstSource.label,
-                        tone: firstSource.tone
-                    )
-                }
-
-                Spacer(minLength: 0)
-
-                if state.canStopCapture {
-                    Button("Stop", role: .destructive) {
-                        Task {
-                            await router.stopCapture()
-                        }
+        HStack(spacing: 10) {
+            Button {
+                model.toggleSessionControllerCollapsed()
+            } label: {
+                HStack(spacing: 10) {
+                    if state.tone == .live {
+                        OMRecDot(size: 8)
+                    } else {
+                        Circle()
+                            .fill(color(for: state.tone))
+                            .frame(width: 8, height: 8)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
 
-                Button("Open") {
-                    _ = router.openMainWindow()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(state.title)
+                            .font(.om.body)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Color.om.ink)
+                            .lineLimit(1)
+
+                        Text(compactSubtitle)
+                            .font(.om.caption)
+                            .foregroundStyle(Color.om.ink3)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            elapsedChip
+
+            if state.canStopCapture {
+                OMButton(variant: .destructive) {
+                    stopCaptureFromRecorder()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.fill").font(.system(size: 9))
+                        Text("Stop")
+                    }
+                }
+            }
+
+            surfaceControlButton(
+                systemImage: "xmark",
+                accessibilityLabel: "Dismiss Recorder"
+            ) {
+                model.dismissSessionController()
+                dismiss()
             }
         }
     }
@@ -450,8 +579,9 @@ private struct FloatingSessionControllerView: View {
             expandedHeader
             recorderStrip
             endSuggestionCallout
-            scratchpadCard
-            transcriptPreviewCard
+            microphoneSelectorRow
+            recorderTabBar
+            activeTabContent
 
             if state.showsProcessingIndicator {
                 processingRibbon
@@ -464,27 +594,25 @@ private struct FloatingSessionControllerView: View {
     private var expandedHeader: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(state.menuBarSectionTitle.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .tracking(1.1)
+                OMEyebrow(state.kind == .processing ? "Wrapping up" : "Recording")
 
                 Text(state.title)
-                    .font(.title3.weight(.semibold))
+                    .font(.om.sectionTitle)
+                    .foregroundStyle(Color.om.ink)
                     .lineLimit(2)
 
                 Text(expandedSubtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(.om.caption)
+                    .foregroundStyle(Color.om.ink3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 12)
 
-            VStack(alignment: .trailing, spacing: 10) {
+            VStack(alignment: .trailing, spacing: 8) {
                 elapsedChip
 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     surfaceControlButton(
                         systemImage: "rectangle.compress.vertical",
                         accessibilityLabel: "Collapse Recorder"
@@ -505,69 +633,36 @@ private struct FloatingSessionControllerView: View {
     }
 
     private var recorderStrip: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(color(for: state.tone).opacity(0.14))
-                        .frame(width: 44, height: 44)
-
+        HStack(alignment: .center, spacing: 12) {
+            HStack(spacing: 8) {
+                if state.tone == .live {
+                    OMRecDot(size: 8)
+                } else {
                     Circle()
                         .fill(color(for: state.tone))
-                        .frame(width: 12, height: 12)
+                        .frame(width: 8, height: 8)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(state.controllerStatusTitle)
-                        .font(.headline)
+                        .font(.om.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.om.ink)
 
-                    if let detail = nonBlank(state.controllerStatusDetail) ?? nonBlank(state.detailText) {
-                        Text(detail)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    if let lifecycleText = state.lifecycleTimestampText() {
-                        Text(lifecycleText)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 8) {
-                SessionControllerMiniBadge(
-                    title: "Session",
-                    value: state.healthLabel,
-                    tone: state.tone
-                )
-
-                SessionControllerMiniBadge(
-                    title: "Capture",
-                    value: state.captureLabel,
-                    tone: state.kind == .processing ? .neutral : state.tone
-                )
-
-                ForEach(state.sourceStatuses) { source in
-                    SessionControllerMiniBadge(
-                        title: source.title,
-                        value: source.label,
-                        tone: source.tone
-                    )
+                    Text(state.kind == .processing ? "Oatmeal is finishing this note locally." : "Oatmeal is recording this meeting locally.")
+                        .font(.om.caption)
+                        .foregroundStyle(Color.om.ink3)
                 }
             }
+
+            Spacer(minLength: 0)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.42))
-        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.om.paper2, in: RoundedRectangle(cornerRadius: OMRadius.md))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .strokeBorder(Color.om.line, lineWidth: 1)
         )
     }
 
@@ -576,133 +671,223 @@ private struct FloatingSessionControllerView: View {
         if let detectionState = model.menuBarMeetingDetectionState,
            detectionState.phase == .endSuggestion {
             VStack(alignment: .leading, spacing: 10) {
-                Text(detectionState.headline.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.pink)
-                    .tracking(1.0)
-
-                HStack(alignment: .top, spacing: 10) {
+                HStack(spacing: 8) {
                     Image(systemName: detectionState.symbolName)
-                        .foregroundStyle(.pink)
-                        .font(.headline)
-
-                    Text(detectionState.detailText)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(Color.om.ember)
+                        .font(.system(size: 12, weight: .semibold))
+                    OMEyebrow(detectionState.headline)
                 }
 
-                HStack(spacing: 10) {
-                    Button(detectionState.primaryActionTitle, role: .destructive) {
+                Text(detectionState.detailText)
+                    .font(.om.caption)
+                    .foregroundStyle(Color.om.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    OMButton(detectionState.primaryActionTitle, variant: .destructive) {
                         Task {
                             await router.startPendingMeetingDetection()
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-
                     if let secondaryActionTitle = detectionState.secondaryActionTitle {
-                        Button(secondaryActionTitle) {
+                        OMButton(secondaryActionTitle, variant: .secondary) {
                             router.ignorePendingMeetingDetection()
                         }
-                        .buttonStyle(.bordered)
                     }
                 }
             }
             .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.pink.opacity(0.10))
-            )
+            .background(Color.om.ember.opacity(0.08), in: RoundedRectangle(cornerRadius: OMRadius.md))
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.pink.opacity(0.18), lineWidth: 1)
+                RoundedRectangle(cornerRadius: OMRadius.md)
+                    .strokeBorder(Color.om.ember.opacity(0.20), lineWidth: 1)
             )
         }
     }
 
     private var scratchpadCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            labelRow(title: "Scratchpad", caption: scratchpadCaption)
+            labelRow(title: "Scratchpad", caption: "Private notes stay here and are excluded from summaries and sharing.")
 
-            Text(scratchpadPreview)
-                .font(.callout)
-                .foregroundStyle(nonBlank(currentNote?.rawNotes) == nil ? .secondary : .primary)
-                .lineLimit(6)
-                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: scratchpadBinding)
+                .font(.om.body)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 130)
+                .padding(8)
+                .background(Color.om.card, in: RoundedRectangle(cornerRadius: OMRadius.md))
+                .overlay(
+                    RoundedRectangle(cornerRadius: OMRadius.md)
+                        .strokeBorder(Color.om.line, lineWidth: 1)
+                )
+
+            if let recorderMessage {
+                Text(recorderMessage)
+                    .font(.om.caption)
+                    .foregroundStyle(Color.om.ink3)
+            }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.36))
+        .padding(12)
+        .background(Color.om.paper2, in: RoundedRectangle(cornerRadius: OMRadius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .strokeBorder(Color.om.line, lineWidth: 1)
         )
     }
 
     private var transcriptPreviewCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            labelRow(title: "Transcript Preview", caption: transcriptCaption)
+            labelRow(title: "Transcript", caption: transcriptCaption)
 
             if transcriptPreviewLines.isEmpty {
                 Text(transcriptEmptyState)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(.om.body)
+                    .foregroundStyle(Color.om.ink3)
             } else {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(transcriptPreviewLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(.callout)
-                            .foregroundStyle(.primary)
+                            .font(.om.body)
+                            .foregroundStyle(Color.om.ink2)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(.vertical, 2)
                     }
                 }
             }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.36))
+        .padding(12)
+        .background(Color.om.paper2, in: RoundedRectangle(cornerRadius: OMRadius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .strokeBorder(Color.om.line, lineWidth: 1)
         )
     }
 
     private var processingRibbon: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles.rectangle.stack.fill")
-                .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(Color.om.oat2)
+                .font(.system(size: 11, weight: .semibold))
 
-            Text(state.processingLabel ?? "Oatmeal is finishing the meeting note in the background.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Text(state.processingLabel ?? "Transcribing, writing the summary, and extracting tasks in the background.")
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.white.opacity(0.36), in: Capsule())
+        .padding(.vertical, 8)
+        .background(Color.om.oat.opacity(0.08), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.om.oat.opacity(0.16), lineWidth: 1))
     }
 
     private var actionRail: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if state.canStopCapture {
-                Button("Stop Capture", role: .destructive) {
-                    Task {
-                        await router.stopCapture()
+                OMButton(variant: .destructive) {
+                    stopCaptureFromRecorder()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.fill").font(.system(size: 9))
+                        Text("Stop & save")
                     }
                 }
-                .buttonStyle(.borderedProminent)
             }
 
-            Button("Open Note") {
+            OMButton("Open note", variant: .secondary) {
                 _ = router.openMainWindow()
             }
-            .buttonStyle(.bordered)
 
             if state.canOpenTranscript {
-                Button("Transcript") {
+                OMButton("Transcript", variant: .secondary) {
                     _ = router.openMainWindow(openTranscript: true)
                 }
-                .buttonStyle(.bordered)
             }
 
             Spacer()
+        }
+    }
+
+    private var microphoneSelectorRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "mic.fill")
+                .foregroundStyle(Color.om.ring)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                OMEyebrow("Microphone")
+
+                Text(selectedMicrophoneName ?? "Default microphone")
+                    .font(.om.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.om.ink)
+            }
+
+            Spacer(minLength: 0)
+
+            Menu {
+                ForEach(availableMicrophones) { device in
+                    Button {
+                        Task {
+                            await switchMicrophone(to: device)
+                        }
+                    } label: {
+                        Label(device.name, systemImage: device.id == selectedMicrophoneID ? "checkmark" : "")
+                    }
+                }
+            } label: {
+                Text("Change")
+                    .font(.om.button)
+                    .foregroundStyle(Color.om.ink)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.om.card, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.om.line2, lineWidth: 1))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.om.card, in: RoundedRectangle(cornerRadius: OMRadius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: OMRadius.md)
+                .strokeBorder(Color.om.line, lineWidth: 1)
+        )
+    }
+
+    private var recorderTabBar: some View {
+        HStack(spacing: 6) {
+            ForEach(RecorderMeetingTab.allCases) { tab in
+                let isActive = selectedTab == tab
+                Button {
+                    selectedTab = tab
+                } label: {
+                    Text(tab.title)
+                        .font(.om.button)
+                        .foregroundStyle(isActive ? Color.om.paper : Color.om.ink2)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(isActive ? Color.om.ink : Color.om.card)
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(isActive ? Color.om.ink : Color.om.line2, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private var activeTabContent: some View {
+        switch selectedTab {
+        case .scratchpad:
+            scratchpadCard
+        case .transcript:
+            transcriptPreviewCard
         }
     }
 
@@ -718,33 +903,11 @@ private struct FloatingSessionControllerView: View {
             return detail
         }
 
-        let sourceSummary = state.sourceStatuses
-            .map { "\($0.title) \($0.label.lowercased())" }
-            .joined(separator: " • ")
-
-        if !sourceSummary.isEmpty {
-            return sourceSummary
+        if state.kind == .processing {
+            return "Oatmeal is finishing this meeting locally."
         }
 
-        return state.menuBarSummary
-    }
-
-    private var scratchpadPreview: String {
-        if let rawNotes = nonBlank(currentNote?.rawNotes) {
-            return rawNotes
-        }
-
-        if state.canStopCapture {
-            return "Use the main note window for longer notes. Oatmeal keeps this recorder small so you can stay in the meeting."
-        }
-
-        return "No scratchpad text yet. Open the full note if you want to add more context while Oatmeal finishes processing."
-    }
-
-    private var scratchpadCaption: String {
-        nonBlank(currentNote?.rawNotes) == nil
-            ? "Lightweight notes stay attached to this meeting."
-            : "Raw notes from this meeting stay visible here."
+        return "Stay in the conversation while Oatmeal records in the background."
     }
 
     private var transcriptPreviewLines: [String] {
@@ -769,8 +932,8 @@ private struct FloatingSessionControllerView: View {
 
     private var transcriptCaption: String {
         state.canOpenTranscript
-            ? "A quick look at what Oatmeal is hearing."
-            : "Live transcript snippets will show up here while recording."
+            ? "A quick look at what Oatmeal is hearing right now."
+            : "Transcript snippets show up here while Oatmeal catches up."
     }
 
     private var transcriptEmptyState: String {
@@ -781,51 +944,25 @@ private struct FloatingSessionControllerView: View {
         return "Transcript updates will appear here as Oatmeal catches up."
     }
 
-    private var recorderPill: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(color(for: state.tone))
-                .frame(width: 8, height: 8)
-            Text(recorderPillText)
-                .font(.caption.weight(.semibold))
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(color(for: state.tone).opacity(0.12), in: Capsule())
-    }
-
-    private var recorderPillText: String {
-        switch state.kind {
-        case .active:
-            return state.controllerStatusTitle
-        case .processing:
-            return "Wrapping up"
-        case .recent:
-            return "Ready"
-        }
-    }
-
     private var elapsedChip: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             Text(state.elapsedText() ?? "--:--")
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.white.opacity(0.34), in: Capsule())
+                .font(.om.meta)
+                .monospacedDigit()
+                .foregroundStyle(Color.om.ink2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.om.card, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.om.line, lineWidth: 1))
         }
     }
 
     private func labelRow(title: String, caption: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .tracking(1.0)
-
+        VStack(alignment: .leading, spacing: 4) {
+            OMEyebrow(title)
             Text(caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.om.caption)
+                .foregroundStyle(Color.om.ink3)
         }
     }
 
@@ -836,9 +973,11 @@ private struct FloatingSessionControllerView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.caption.weight(.semibold))
-                .frame(width: 28, height: 28)
-                .background(Color.white.opacity(0.34), in: Circle())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.om.ink3)
+                .frame(width: 24, height: 24)
+                .background(Color.om.card, in: Circle())
+                .overlay(Circle().strokeBorder(Color.om.line, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)
@@ -847,15 +986,46 @@ private struct FloatingSessionControllerView: View {
     private func color(for tone: SessionControllerState.Tone) -> Color {
         switch tone {
         case .live:
-            Color(red: 0.84, green: 0.24, blue: 0.19)
+            Color.om.recDot
         case .delayed:
-            Color(red: 0.86, green: 0.55, blue: 0.17)
+            Color.om.honey
         case .recovered:
-            Color(red: 0.22, green: 0.46, blue: 0.82)
+            Color.om.sage2
         case .failed:
-            Color(red: 0.78, green: 0.25, blue: 0.41)
+            Color.om.ember
         case .neutral:
-            .secondary
+            Color.om.ink3
+        }
+    }
+
+    private var selectedMicrophoneName: String? {
+        availableMicrophones.first(where: { $0.id == selectedMicrophoneID })?.name
+    }
+
+    private func refreshLocalState() {
+        selectedTab = .scratchpad
+        selectedMicrophoneID = model.activeMicrophoneID(for: state.noteID)
+        recorderMessage = nil
+    }
+
+    private func stopCaptureFromRecorder() {
+        if model.shouldWarnBeforeStoppingCapture(for: state.noteID) {
+            isStopWarningPresented = true
+            return
+        }
+
+        Task {
+            await router.stopCapture()
+        }
+    }
+
+    private func switchMicrophone(to device: CaptureInputDevice) async {
+        do {
+            try await model.switchActiveMicrophone(to: device.id, for: state.noteID)
+            selectedMicrophoneID = device.id
+            recorderMessage = "Using \(device.name)."
+        } catch {
+            recorderMessage = error.localizedDescription
         }
     }
 }
@@ -877,99 +1047,176 @@ private struct FloatingMeetingDetectionPromptView: View {
 
     let state: MeetingDetectionPromptState
 
+    private let surface = Color(nsColor: NSColor(srgbRed: 0.125, green: 0.102, blue: 0.078, alpha: 0.82))
+    private let cream = Color(.sRGB, red: 0.961, green: 0.937, blue: 0.894, opacity: 1)
+    private var creamMuted: Color { cream.opacity(0.72) }
+    private var creamDim: Color { cream.opacity(0.45) }
+    private var creamHairline: Color { cream.opacity(0.08) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            detail
-            candidateChooser
+            headline
+            contextLine
+            if !state.candidateOptions.isEmpty {
+                candidateChooser
+            }
+            countdownBar
             actions
         }
-        .padding(16)
-        .frame(minWidth: 300, idealWidth: 324, maxWidth: 340)
+        .frame(width: 360)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: OMRadius.lg, style: .continuous)
                 .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: OMRadius.lg, style: .continuous)
+                        .fill(surface)
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+            RoundedRectangle(cornerRadius: OMRadius.lg, style: .continuous)
+                .strokeBorder(cream.opacity(0.10), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.12), radius: 24, y: 14)
+        .shadow(color: Color.black.opacity(0.35), radius: 24, y: 14)
         .padding(8)
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.orange.opacity(0.14))
-                    .frame(width: 38, height: 38)
-
-                Image(systemName: state.symbolName)
-                    .foregroundStyle(.orange)
-                    .font(.headline)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.headline.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .tracking(1.0)
-                Text(state.title)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(2)
-            }
-
-            Spacer()
+        HStack(alignment: .center, spacing: 10) {
+            OatLeafMark(size: 18, tint: cream)
+            Text("Oatmeal")
+                .font(.om.body)
+                .fontWeight(.medium)
+                .foregroundStyle(creamMuted)
+            Spacer(minLength: 0)
+            Text(nowLabel)
+                .font(.om.meta)
+                .foregroundStyle(creamDim)
         }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.top, OMSpacing.s3 + 2)
+        .padding(.bottom, 6)
     }
 
-    private var detail: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SessionControllerMiniBadge(
-                title: "Source",
-                value: state.sourceName,
-                tone: state.phase == .endSuggestion ? .failed : .delayed
-            )
+    private var headline: some View {
+        Text(headlineCopy)
+            .font(.om.sectionTitle)
+            .foregroundStyle(cream)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, OMSpacing.s4)
+            .padding(.bottom, 6)
+    }
 
-            Text(state.detailText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+    private var contextLine: some View {
+        (
+            Text(state.title)
+                .font(.om.body)
+                .fontWeight(.medium)
+                .foregroundStyle(cream)
+            + Text(" · \(state.sourceName)")
+                .font(.om.body)
+                .foregroundStyle(creamMuted)
+        )
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
     }
 
     @ViewBuilder
     private var candidateChooser: some View {
-        if !state.candidateOptions.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Choose the meeting")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                ForEach(state.candidateOptions) { option in
-                    candidateButton(option)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Choose the meeting".uppercased())
+                .font(.om.eyebrow)
+                .tracking(1.8)
+                .foregroundStyle(creamDim)
+            ForEach(state.candidateOptions) { option in
+                candidateButton(option)
             }
         }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
+    }
+
+    /// Decorative auto-start countdown shown above the actions. The detection
+    /// state doesn't expose an auto-start deadline on the model yet, so the
+    /// bar fills from 0→1 over ~8 seconds and the mono label counts down the
+    /// same interval. If the user taps Record / Not a meeting first, the
+    /// prompt dismisses and the animation disposes with the window.
+    private var countdownBar: some View {
+        let window: Double = 8
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Auto-starts")
+                    .font(.om.meta)
+                    .foregroundStyle(creamDim)
+                Spacer()
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let elapsed = context.date.timeIntervalSince(state.detectedAt)
+                    let remaining = max(0, Int((window - elapsed).rounded(.up)))
+                    Text("\(remaining)s")
+                        .font(.om.meta)
+                        .monospacedDigit()
+                        .foregroundStyle(creamMuted)
+                }
+            }
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+                let elapsed = context.date.timeIntervalSince(state.detectedAt)
+                let progress = max(0, min(1, elapsed / window))
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(cream.opacity(0.10))
+                        Capsule()
+                            .fill(cream.opacity(0.55))
+                            .frame(width: geo.size.width * progress)
+                    }
+                }
+                .frame(height: 3)
+            }
+            .frame(height: 3)
+        }
+        .padding(.horizontal, OMSpacing.s4)
+        .padding(.bottom, OMSpacing.s3)
     }
 
     private var actions: some View {
-        HStack(spacing: 10) {
-            Button(state.primaryActionTitle) {
-                Task {
-                    await router.startPendingMeetingDetection()
+        VStack(spacing: 0) {
+            Rectangle().fill(creamHairline).frame(height: 1)
+            HStack(spacing: OMSpacing.s2) {
+                Button {
+                    Task { await router.startPendingMeetingDetection() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "mic.fill").font(.system(size: 11))
+                        Text(state.primaryActionTitle)
+                            .font(.om.button)
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .foregroundStyle(Color(.sRGB, red: 0.109, green: 0.090, blue: 0.071, opacity: 1))
+                    .background(cream)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!state.primaryActionEnabled)
+                .buttonStyle(.plain)
+                .disabled(!state.primaryActionEnabled)
 
-            if let secondaryActionTitle = state.secondaryActionTitle {
-                Button(secondaryActionTitle) {
-                    router.ignorePendingMeetingDetection()
+                if let secondary = state.secondaryActionTitle {
+                    Button {
+                        router.ignorePendingMeetingDetection()
+                    } label: {
+                        Text(secondary)
+                            .font(.om.button)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .foregroundStyle(cream)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(cream.opacity(0.18), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.bordered)
             }
+            .padding(OMSpacing.s3)
         }
     }
 
@@ -979,102 +1226,59 @@ private struct FloatingMeetingDetectionPromptView: View {
         return Button {
             router.selectPendingMeetingCandidate(option.id)
         } label: {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    .font(.body)
+                    .foregroundStyle(isSelected ? cream : creamDim)
+                    .font(.system(size: 14))
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(option.title)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .font(.om.body)
+                        .fontWeight(.medium)
+                        .foregroundStyle(cream)
                         .multilineTextAlignment(.leading)
+                        .lineLimit(1)
                     Text(option.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.om.caption)
+                        .foregroundStyle(creamDim)
                         .multilineTextAlignment(.leading)
+                        .lineLimit(1)
                 }
 
-                Spacer()
+                Spacer(minLength: 0)
             }
-            .padding(10)
-            .background(candidateBackgroundColor(isSelected), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? cream.opacity(0.12) : cream.opacity(0.04))
+            )
         }
         .buttonStyle(.plain)
     }
 
-    private func candidateBackgroundColor(_ isSelected: Bool) -> Color {
-        isSelected ? Color.accentColor.opacity(0.14) : Color.white.opacity(0.36)
-    }
-}
+    // MARK: Copy
 
-private struct SessionControllerBadge: View {
-    let title: String
-    let value: String
-    let tone: SessionControllerState.Tone
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.primary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(color.opacity(0.12), in: Capsule())
-    }
-
-    private var color: Color {
-        switch tone {
-        case .live:
-            Color(red: 0.84, green: 0.24, blue: 0.19)
-        case .delayed:
-            Color(red: 0.86, green: 0.55, blue: 0.17)
-        case .recovered:
-            Color(red: 0.22, green: 0.46, blue: 0.82)
-        case .failed:
-            Color(red: 0.78, green: 0.25, blue: 0.41)
-        case .neutral:
-            .secondary
+    private var headlineCopy: String {
+        switch state.phase {
+        case .start:
+            return "A meeting looks like it just started."
+        case .endSuggestion:
+            return "This meeting looks like it ended."
         }
     }
-}
 
-private struct SessionControllerMiniBadge: View {
-    let title: String
-    let value: String
-    let tone: SessionControllerState.Tone
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text("\(title): \(value)")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(color.opacity(0.12), in: Capsule())
-    }
-
-    private var color: Color {
-        switch tone {
-        case .live:
-            Color(red: 0.84, green: 0.24, blue: 0.19)
-        case .delayed:
-            Color(red: 0.86, green: 0.55, blue: 0.17)
-        case .recovered:
-            Color(red: 0.22, green: 0.46, blue: 0.82)
-        case .failed:
-            Color(red: 0.78, green: 0.25, blue: 0.41)
-        case .neutral:
-            .secondary
+    private var nowLabel: String {
+        let delta = Date().timeIntervalSince(state.detectedAt)
+        switch delta {
+        case ..<10:   return "now"
+        case 10..<60: return "\(Int(delta))s"
+        case 60..<3600:
+            let m = Int(delta / 60)
+            return "\(m)m"
+        default:
+            let h = Int(delta / 3600)
+            return "\(h)h"
         }
     }
 }

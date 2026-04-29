@@ -86,6 +86,7 @@ struct AppleSpeechTranscriptionBackend: AppleSpeechTranscriptionServing {
             throw TranscriptionPipelineError.speechRecognizerUnavailable("Apple Speech is not available right now.")
         }
 
+        let recognizerLocaleIdentifier = recognizer.locale.identifier
         let speechRequest = SFSpeechURLRecognitionRequest(url: request.audioFileURL)
         speechRequest.shouldReportPartialResults = false
         speechRequest.taskHint = .dictation
@@ -116,7 +117,8 @@ struct AppleSpeechTranscriptionBackend: AppleSpeechTranscriptionServing {
                             executionKind: .systemService,
                             warningMessages: [
                                 "Apple Speech on macOS 15 is a best-effort fallback and may use network-backed recognition."
-                            ]
+                            ],
+                            detectedLanguage: recognizerLocaleIdentifier.isEmpty ? nil : recognizerLocaleIdentifier
                         )
                     )
                 )

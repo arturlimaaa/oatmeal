@@ -275,7 +275,8 @@ public final class LocalTranscriptionPipeline: LocalTranscriptionServicing, @unc
             segments: result.segments,
             backend: result.backend,
             executionKind: result.executionKind,
-            warningMessages: mergedWarnings
+            warningMessages: mergedWarnings,
+            detectedLanguage: result.detectedLanguage
         )
     }
 }

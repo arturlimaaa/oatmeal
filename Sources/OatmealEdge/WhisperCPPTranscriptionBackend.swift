@@ -29,7 +29,15 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
     }
 
     func status(configuration: LocalTranscriptionConfiguration, discoveredModels: [ManagedLocalModel]) -> TranscriptionBackendStatus {
-        let installation = installationState(discoveredModels: discoveredModels)
+        let policyDecision = LanguagePolicy.decide(
+            configuredLocale: configuration.preferredLocaleIdentifier,
+            discoveredModels: discoveredModels,
+            activeBackend: configuration.preferredBackend
+        )
+        let installation = installationState(
+            discoveredModels: discoveredModels,
+            policyModel: policyDecision.modelToUse
+        )
         return TranscriptionBackendStatus(
             backend: .whisperCPPCLI,
             displayName: "whisper.cpp",
@@ -48,7 +56,16 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
             throw TranscriptionPipelineError.fileNotFound
         }
 
-        let installation = installationState(discoveredModels: discoveredModels)
+        let policyDecision = LanguagePolicy.decide(
+            configuredLocale: request.preferredLocaleIdentifier,
+            discoveredModels: discoveredModels,
+            activeBackend: configuration.preferredBackend
+        )
+
+        let installation = installationState(
+            discoveredModels: discoveredModels,
+            policyModel: policyDecision.modelToUse
+        )
         guard let executableURL = installation.executableURL else {
             throw TranscriptionPipelineError.backendUnavailable(installation.detail)
         }
@@ -57,6 +74,10 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         }
         guard let normalizationPlan = installation.normalizationPlan else {
             throw TranscriptionPipelineError.backendUnavailable(installation.detail)
+        }
+
+        if let blockingReason = policyDecision.blockingReason {
+            throw TranscriptionPipelineError.backendUnavailable(blockingReason)
         }
 
         let jobDirectoryURL = try makeJobDirectory()
@@ -68,7 +89,6 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
 
         try normalizer.normalize(inputURL: request.audioFileURL, outputURL: normalizedURL)
 
-        let language = whisperLanguage(from: request.preferredLocaleIdentifier)
         let threadCount = String(max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8)))
         _ = try executor.run(
             executableURL: executableURL,
@@ -77,7 +97,7 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
                 "-f", normalizedURL.path,
                 "-ojf",
                 "-of", outputPrefixURL.path,
-                "-l", language,
+                "-l", policyDecision.whisperLanguageArg,
                 "-t", threadCount,
                 "-np"
             ],
@@ -91,19 +111,31 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         }
 
         let jsonData = try Data(contentsOf: jsonURL)
-        let segments = try WhisperJSONParser.parseTranscriptSegments(data: jsonData, startedAt: request.startedAt)
+        let parseResult = try WhisperJSONParser.parse(data: jsonData, startedAt: request.startedAt)
+
+        // If whisper.cpp's JSON did not surface a detected language (older
+        // builds, or a `-l auto` run that resolved to silence), fall back to
+        // the policy's configured argument when it is a real language code.
+        let detectedLanguage = parseResult.detectedLanguage ?? {
+            let arg = policyDecision.whisperLanguageArg
+            return arg == "auto" ? nil : arg
+        }()
 
         return TranscriptionJobResult(
-            segments: segments,
+            segments: parseResult.segments,
             backend: .whisperCPPCLI,
             executionKind: .local,
             warningMessages: [
                 "Transcribed locally with whisper.cpp using \(model.displayName) after normalizing audio with \(normalizationPlan.tool.displayName)."
-            ]
+            ],
+            detectedLanguage: detectedLanguage
         )
     }
 
-    private func installationState(discoveredModels: [ManagedLocalModel]) -> WhisperInstallationState {
+    private func installationState(
+        discoveredModels: [ManagedLocalModel],
+        policyModel: ManagedLocalModel? = nil
+    ) -> WhisperInstallationState {
         let executableURL = locator.locate(
             envKey: "OATMEAL_WHISPER_BINARY_PATH",
             candidateNames: ["whisper-cli", "whisper-cpp"],
@@ -116,7 +148,7 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
         )
 
         let normalizationPlan = normalizer.availablePlan()
-        let model = discoveredModels.first
+        let model = policyModel ?? discoveredModels.first
 
         let detailParts = [
             executableURL == nil ? "Install or point Oatmeal at a `whisper.cpp` CLI binary via `OATMEAL_WHISPER_BINARY_PATH`." : nil,
@@ -148,19 +180,6 @@ struct WhisperCPPTranscriptionBackend: WhisperCPPTranscriptionServing {
             .appendingPathComponent("oatmeal-whisper-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         return directoryURL
-    }
-
-    private func whisperLanguage(from localeIdentifier: String?) -> String {
-        guard let localeIdentifier, !localeIdentifier.isEmpty else {
-            return "auto"
-        }
-
-        let locale = NSLocale(localeIdentifier: localeIdentifier)
-        if let languageCode = locale.object(forKey: .languageCode) as? String, !languageCode.isEmpty {
-            return languageCode
-        }
-
-        return String(localeIdentifier.prefix(2)).lowercased()
     }
 }
 

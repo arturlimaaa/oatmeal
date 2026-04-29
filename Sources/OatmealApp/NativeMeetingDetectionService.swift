@@ -4,6 +4,17 @@ import Foundation
 struct NativeMeetingRunningApplication: Equatable, Sendable {
     let bundleIdentifier: String?
     let localizedName: String?
+    let processIdentifier: pid_t?
+
+    init(
+        bundleIdentifier: String?,
+        localizedName: String?,
+        processIdentifier: pid_t? = nil
+    ) {
+        self.bundleIdentifier = bundleIdentifier
+        self.localizedName = localizedName
+        self.processIdentifier = processIdentifier
+    }
 }
 
 @MainActor
@@ -50,7 +61,8 @@ final class LiveNativeMeetingApplicationWorkspace: NativeMeetingApplicationWorks
     private nonisolated static func map(_ application: NSRunningApplication) -> NativeMeetingRunningApplication {
         NativeMeetingRunningApplication(
             bundleIdentifier: application.bundleIdentifier,
-            localizedName: application.localizedName
+            localizedName: application.localizedName,
+            processIdentifier: application.processIdentifier
         )
     }
 }

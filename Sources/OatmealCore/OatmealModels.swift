@@ -119,6 +119,10 @@ public struct TranscriptSegment: Codable, Equatable, Hashable, Sendable, Identif
     public var speakerName: String?
     public var text: String
     public var confidence: Double?
+    /// Optional BCP 47 language tag for this segment. `nil` means the segment
+    /// inherits the note's primary language. Forward-compatible with future
+    /// per-segment code-switching.
+    public var language: String?
 
     public init(
         id: UUID = UUID(),
@@ -126,7 +130,8 @@ public struct TranscriptSegment: Codable, Equatable, Hashable, Sendable, Identif
         endTime: Date? = nil,
         speakerName: String? = nil,
         text: String,
-        confidence: Double? = nil
+        confidence: Double? = nil,
+        language: String? = nil
     ) {
         self.id = id
         self.startTime = startTime
@@ -134,6 +139,39 @@ public struct TranscriptSegment: Codable, Equatable, Hashable, Sendable, Identif
         self.speakerName = speakerName
         self.text = text
         self.confidence = confidence
+        self.language = language
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case startTime
+        case endTime
+        case speakerName
+        case text
+        case confidence
+        case language
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        startTime = try container.decodeIfPresent(Date.self, forKey: .startTime)
+        endTime = try container.decodeIfPresent(Date.self, forKey: .endTime)
+        speakerName = try container.decodeIfPresent(String.self, forKey: .speakerName)
+        text = try container.decode(String.self, forKey: .text)
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(startTime, forKey: .startTime)
+        try container.encodeIfPresent(endTime, forKey: .endTime)
+        try container.encodeIfPresent(speakerName, forKey: .speakerName)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
+        try container.encodeIfPresent(language, forKey: .language)
     }
 }
 
@@ -557,6 +595,10 @@ public struct NoteTranscriptionAttempt: Codable, Equatable, Sendable, Identifiab
     public var segmentCount: Int
     public var warningMessages: [String]
     public var errorMessage: String?
+    /// Optional BCP 47 language tag describing which language was used for
+    /// this transcription attempt. Recorded for support and re-transcribe
+    /// history once multilingual transcription is wired up.
+    public var language: String?
 
     public init(
         id: UUID = UUID(),
@@ -567,7 +609,8 @@ public struct NoteTranscriptionAttempt: Codable, Equatable, Sendable, Identifiab
         status: NoteTranscriptionStatus,
         segmentCount: Int = 0,
         warningMessages: [String] = [],
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        language: String? = nil
     ) {
         self.id = id
         self.backend = backend
@@ -578,6 +621,48 @@ public struct NoteTranscriptionAttempt: Codable, Equatable, Sendable, Identifiab
         self.segmentCount = segmentCount
         self.warningMessages = warningMessages
         self.errorMessage = errorMessage
+        self.language = language
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case backend
+        case executionKind
+        case requestedAt
+        case completedAt
+        case status
+        case segmentCount
+        case warningMessages
+        case errorMessage
+        case language
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        backend = try container.decode(NoteTranscriptionBackend.self, forKey: .backend)
+        executionKind = try container.decode(NoteTranscriptionExecutionKind.self, forKey: .executionKind)
+        requestedAt = try container.decode(Date.self, forKey: .requestedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        status = try container.decode(NoteTranscriptionStatus.self, forKey: .status)
+        segmentCount = try container.decodeIfPresent(Int.self, forKey: .segmentCount) ?? 0
+        warningMessages = try container.decodeIfPresent([String].self, forKey: .warningMessages) ?? []
+        errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(backend, forKey: .backend)
+        try container.encode(executionKind, forKey: .executionKind)
+        try container.encode(requestedAt, forKey: .requestedAt)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encode(status, forKey: .status)
+        try container.encode(segmentCount, forKey: .segmentCount)
+        try container.encode(warningMessages, forKey: .warningMessages)
+        try container.encodeIfPresent(errorMessage, forKey: .errorMessage)
+        try container.encodeIfPresent(language, forKey: .language)
     }
 }
 
@@ -1440,6 +1525,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public var generationStatus: NoteGenerationStatus
     public var transcriptionStatus: NoteTranscriptionStatus
     public var rawNotes: String
+    public var scratchpad: String
     public var transcriptSegments: [TranscriptSegment]
     public var liveSessionState: LiveSessionState
     public var enhancedNote: EnhancedNote?
@@ -1449,6 +1535,11 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
     public var processingState: PostCaptureProcessingState
     public var createdAt: Date
     public var updatedAt: Date
+    /// Optional BCP 47 language tag describing the primary language of the
+    /// meeting. Populated by the transcription pipeline once multilingual
+    /// detection is wired up; persisted so reopening an old note still shows
+    /// the language.
+    public var language: String?
 
     public init(
         id: UUID = UUID(),
@@ -1462,6 +1553,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         generationStatus: NoteGenerationStatus = .idle,
         transcriptionStatus: NoteTranscriptionStatus = .idle,
         rawNotes: String = "",
+        scratchpad: String = "",
         transcriptSegments: [TranscriptSegment] = [],
         liveSessionState: LiveSessionState = .idle,
         enhancedNote: EnhancedNote? = nil,
@@ -1470,7 +1562,8 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         generationHistory: [NoteGenerationAttempt] = [],
         processingState: PostCaptureProcessingState = .idle,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        language: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -1483,6 +1576,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         self.generationStatus = generationStatus
         self.transcriptionStatus = transcriptionStatus
         self.rawNotes = rawNotes
+        self.scratchpad = scratchpad
         self.transcriptSegments = transcriptSegments
         self.liveSessionState = liveSessionState
         self.enhancedNote = enhancedNote
@@ -1492,6 +1586,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         self.processingState = processingState
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.language = language
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1506,6 +1601,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         case generationStatus
         case transcriptionStatus
         case rawNotes
+        case scratchpad
         case transcriptSegments
         case liveSessionState
         case enhancedNote
@@ -1515,6 +1611,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         case processingState
         case createdAt
         case updatedAt
+        case language
     }
 
     public init(from decoder: Decoder) throws {
@@ -1530,6 +1627,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         generationStatus = try container.decodeIfPresent(NoteGenerationStatus.self, forKey: .generationStatus) ?? .idle
         transcriptionStatus = try container.decodeIfPresent(NoteTranscriptionStatus.self, forKey: .transcriptionStatus) ?? .idle
         rawNotes = try container.decodeIfPresent(String.self, forKey: .rawNotes) ?? ""
+        scratchpad = try container.decodeIfPresent(String.self, forKey: .scratchpad) ?? ""
         transcriptSegments = try container.decodeIfPresent([TranscriptSegment].self, forKey: .transcriptSegments) ?? []
         liveSessionState = try container.decodeIfPresent(LiveSessionState.self, forKey: .liveSessionState) ?? .idle
         enhancedNote = try container.decodeIfPresent(EnhancedNote.self, forKey: .enhancedNote)
@@ -1546,6 +1644,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
                 generationHistory: generationHistory,
                 updatedAt: updatedAt
             )
+        language = try container.decodeIfPresent(String.self, forKey: .language)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1561,6 +1660,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         try container.encode(generationStatus, forKey: .generationStatus)
         try container.encode(transcriptionStatus, forKey: .transcriptionStatus)
         try container.encode(rawNotes, forKey: .rawNotes)
+        try container.encode(scratchpad, forKey: .scratchpad)
         try container.encode(transcriptSegments, forKey: .transcriptSegments)
         try container.encode(liveSessionState, forKey: .liveSessionState)
         try container.encodeIfPresent(enhancedNote, forKey: .enhancedNote)
@@ -1570,6 +1670,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         try container.encode(processingState, forKey: .processingState)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(language, forKey: .language)
     }
 
     public var isQuickNote: Bool {
@@ -1586,6 +1687,10 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
 
     public var hasRawNotes: Bool {
         !rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var hasScratchpad: Bool {
+        !scratchpad.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public var canBeSharedWithTranscript: Bool {
@@ -1611,6 +1716,11 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
 
     public mutating func replaceRawNotes(_ text: String, updatedAt: Date = Date()) {
         rawNotes = text
+        self.updatedAt = updatedAt
+    }
+
+    public mutating func replaceScratchpad(_ text: String, updatedAt: Date = Date()) {
+        scratchpad = text
         self.updatedAt = updatedAt
     }
 
@@ -1853,10 +1963,14 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
         backend: NoteTranscriptionBackend,
         executionKind: NoteTranscriptionExecutionKind,
         warnings: [String] = [],
+        language: String? = nil,
         at updatedAt: Date = Date()
     ) {
         transcriptSegments = segments
         transcriptionStatus = .succeeded
+        if let language {
+            self.language = language
+        }
         processingState.complete(stage: .transcription, at: updatedAt)
         if let lastIndex = transcriptionHistory.indices.last {
             transcriptionHistory[lastIndex].backend = backend
@@ -1866,6 +1980,7 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
             transcriptionHistory[lastIndex].segmentCount = segments.count
             transcriptionHistory[lastIndex].warningMessages = warnings
             transcriptionHistory[lastIndex].errorMessage = nil
+            transcriptionHistory[lastIndex].language = language
         } else {
             transcriptionHistory.append(
                 NoteTranscriptionAttempt(
@@ -1875,7 +1990,8 @@ public struct MeetingNote: Codable, Equatable, Sendable, Identifiable {
                     completedAt: updatedAt,
                     status: .succeeded,
                     segmentCount: segments.count,
-                    warningMessages: warnings
+                    warningMessages: warnings,
+                    language: language
                 )
             )
         }

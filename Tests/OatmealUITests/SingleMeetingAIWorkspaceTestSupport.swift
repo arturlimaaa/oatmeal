@@ -105,11 +105,19 @@ final class AIWorkspaceNoopNativeMeetingDetectionService: NativeMeetingDetection
 
 @MainActor
 final class AIWorkspaceNoopBrowserMeetingDetectionService: BrowserMeetingDetectionServicing {
+    let capabilityState = BrowserDetectionCapabilityState(
+        accessibilityTrusted: false,
+        automationAvailability: .unknown
+    )
+
     func start(onDetection: @escaping @MainActor (PendingMeetingDetection) -> Void) {}
     func stop() {}
 }
 
 struct AIWorkspaceStubTranscriptionService: LocalTranscriptionServicing {
+    var stubbedSegments: [TranscriptSegment] = []
+    var stubbedDetectedLanguage: String? = nil
+
     func runtimeState(configuration: LocalTranscriptionConfiguration) async -> LocalTranscriptionRuntimeState {
         LocalTranscriptionRuntimeState(
             modelsDirectoryURL: FileManager.default.temporaryDirectory,
@@ -132,9 +140,10 @@ struct AIWorkspaceStubTranscriptionService: LocalTranscriptionServicing {
         configuration: LocalTranscriptionConfiguration
     ) async throws -> TranscriptionJobResult {
         TranscriptionJobResult(
-            segments: [],
+            segments: stubbedSegments,
             backend: .mock,
-            executionKind: .placeholder
+            executionKind: .placeholder,
+            detectedLanguage: stubbedDetectedLanguage
         )
     }
 }

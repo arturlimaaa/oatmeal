@@ -9,6 +9,12 @@ enum CaptureMode: String, Equatable, Sendable {
     case systemAudioAndMicrophone
 }
 
+struct CaptureInputDevice: Equatable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+}
+
 enum LiveTranscriptionChunkSource: String, Equatable, Sendable {
     case mixed
     case systemAudio
@@ -102,6 +108,8 @@ enum CaptureEngineError: LocalizedError {
     case noActiveCapture
     case missingInputDevice
     case noDisplayAvailable
+    case unknownInputDevice
+    case microphoneSwitchRequiresRestart(String)
     case failedToPrepareRecording(String)
     case failedToStartRecording(String)
     case failedToStopRecording(String)
@@ -116,6 +124,10 @@ enum CaptureEngineError: LocalizedError {
             "No microphone input device is currently available."
         case .noDisplayAvailable:
             "No display was available for system-audio capture."
+        case .unknownInputDevice:
+            "The selected microphone is no longer available."
+        case let .microphoneSwitchRequiresRestart(deviceName):
+            "Switching to \(deviceName) needs a fresh recording. Stop and restart capture to use that microphone."
         case let .failedToPrepareRecording(message):
             "Unable to prepare local recording: \(message)"
         case let .failedToStartRecording(message):
@@ -132,6 +144,9 @@ protocol MeetingCaptureEngineServing {
     func startCapture(for noteID: UUID, mode: CaptureMode) async throws -> ActiveCaptureSession
     func stopCapture() async throws -> CaptureArtifact
     func recordingURL(for noteID: UUID) -> URL?
+    func availableMicrophones() -> [CaptureInputDevice]
+    func activeMicrophoneID(for noteID: UUID) -> String?
+    func switchMicrophone(to id: String, for noteID: UUID) async throws
     func liveTranscriptionChunks(for noteID: UUID) -> [LiveTranscriptionChunk]
     func runtimeHealthSnapshot(for noteID: UUID) -> CaptureRuntimeHealthSnapshot?
     func consumeRuntimeEvents(for noteID: UUID) -> [CaptureRuntimeEvent]
@@ -232,6 +247,46 @@ final class LiveMeetingCaptureEngine: MeetingCaptureEngineServing {
         }
 
         return nil
+    }
+
+    func availableMicrophones() -> [CaptureInputDevice] {
+        let defaultMicrophoneID = AVCaptureDevice.default(for: .audio)?.uniqueID
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+
+        let devices = discoverySession.devices.map { device in
+            CaptureInputDevice(
+                id: device.uniqueID,
+                name: device.localizedName,
+                isDefault: device.uniqueID == defaultMicrophoneID
+            )
+        }
+
+        return devices.sorted { lhs, rhs in
+            if lhs.isDefault != rhs.isDefault {
+                return lhs.isDefault && !rhs.isDefault
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    func activeMicrophoneID(for noteID: UUID) -> String? {
+        guard let activeRecorder, activeRecorder.captureNoteID == noteID else {
+            return nil
+        }
+
+        return activeRecorder.currentMicrophoneID
+    }
+
+    func switchMicrophone(to id: String, for noteID: UUID) async throws {
+        guard let activeRecorder, activeRecorder.captureNoteID == noteID else {
+            throw CaptureEngineError.noActiveCapture
+        }
+
+        try await activeRecorder.switchMicrophone(to: id)
     }
 
     func liveTranscriptionChunks(for noteID: UUID) -> [LiveTranscriptionChunk] {
@@ -377,9 +432,11 @@ private protocol CaptureRecorder: Sendable {
     var activeSession: ActiveCaptureSession? { get }
     var completedLiveTranscriptionChunks: [LiveTranscriptionChunk] { get }
     var runtimeHealthSnapshot: CaptureRuntimeHealthSnapshot? { get }
+    var currentMicrophoneID: String? { get }
     func consumeRuntimeEvents() -> [CaptureRuntimeEvent]
     func start() async throws -> ActiveCaptureSession
     func stop() async throws -> CaptureArtifact
+    func switchMicrophone(to id: String) async throws
 }
 
 private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Sendable {
@@ -399,6 +456,14 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
     private var runtimeEventsStorage: [CaptureRuntimeEvent] = []
     private var isAttemptingRecovery = false
     private var lastInputSampleAt: Date?
+
+    private var availableMicrophones: [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+    }
 
     init(
         noteID: UUID,
@@ -445,6 +510,10 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
                 systemAudioLastActivityAt: nil
             )
         }
+    }
+
+    var currentMicrophoneID: String? {
+        AVCaptureDevice.default(for: .audio)?.uniqueID
     }
 
     func consumeRuntimeEvents() -> [CaptureRuntimeEvent] {
@@ -547,6 +616,22 @@ private final class MicrophoneCaptureRecorder: CaptureRecorder, @unchecked Senda
             endedAt: Date(),
             mode: session.mode
         )
+    }
+
+    func switchMicrophone(to id: String) async throws {
+        guard let targetDevice = availableMicrophones.first(where: { $0.uniqueID == id }) else {
+            throw CaptureEngineError.unknownInputDevice
+        }
+
+        if targetDevice.uniqueID == currentMicrophoneID {
+            return
+        }
+
+        enqueueRuntimeEvent(
+            kind: .degraded,
+            message: "Oatmeal cannot hot-switch microphone-only capture yet. Stop and restart recording to use \(targetDevice.localizedName)."
+        )
+        throw CaptureEngineError.microphoneSwitchRequiresRestart(targetDevice.localizedName)
     }
 
     private func installRecordingTap(
@@ -853,6 +938,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
     private let sourceHeartbeatTimeout: TimeInterval = 6
 
     private var stream: SCStream?
+    private var streamConfiguration: SCStreamConfiguration?
     private var recordingOutput: SCRecordingOutput?
     private var activeSessionStorage: ActiveCaptureSession?
     private var pendingSession: ActiveCaptureSession?
@@ -869,6 +955,15 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
     private var lastSystemAudioSampleAt: Date?
     private var healthMonitorTimer: DispatchSourceTimer?
     private var unexpectedFailureHandled = false
+    private var selectedMicrophoneIDStorage: String?
+
+    private var availableMicrophones: [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+    }
 
     init(
         noteID: UUID,
@@ -935,6 +1030,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
         }
 
         self.stream = stream
+        self.streamConfiguration = configuration
         self.recordingOutput = recordingOutput
     }
 
@@ -974,6 +1070,12 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
         }
     }
 
+    var currentMicrophoneID: String? {
+        lock.withLock {
+            selectedMicrophoneIDStorage ?? AVCaptureDevice.default(for: .audio)?.uniqueID
+        }
+    }
+
     func consumeRuntimeEvents() -> [CaptureRuntimeEvent] {
         lock.withLock {
             let events = runtimeEventsStorage
@@ -999,6 +1101,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
             unexpectedFailureHandled = false
             lastMicrophoneSampleAt = session.startedAt
             lastSystemAudioSampleAt = session.startedAt
+            selectedMicrophoneIDStorage = streamConfiguration?.microphoneCaptureDeviceID ?? AVCaptureDevice.default(for: .audio)?.uniqueID
         }
         startObservingDeviceChanges()
         startHealthMonitor()
@@ -1043,6 +1146,37 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
                 guard let self, let error else { return }
                 self.resumeStop(with: .failure(CaptureEngineError.failedToStopRecording(error.localizedDescription)))
             })
+        }
+    }
+
+    func switchMicrophone(to id: String) async throws {
+        guard let targetDevice = availableMicrophones.first(where: { $0.uniqueID == id }) else {
+            throw CaptureEngineError.unknownInputDevice
+        }
+
+        if targetDevice.uniqueID == currentMicrophoneID {
+            return
+        }
+
+        guard let stream, let streamConfiguration else {
+            throw CaptureEngineError.noActiveCapture
+        }
+
+        if #available(macOS 15.0, *) {
+            streamConfiguration.microphoneCaptureDeviceID = targetDevice.uniqueID
+            try await stream.updateConfiguration(streamConfiguration)
+            lock.withLock {
+                selectedMicrophoneIDStorage = targetDevice.uniqueID
+                lastMicrophoneSampleAt = Date()
+                enqueueRuntimeEventLocked(
+                    kind: .recovered,
+                    source: .microphone,
+                    message: "Oatmeal switched the microphone to \(targetDevice.localizedName).",
+                    createdAt: Date()
+                )
+            }
+        } else {
+            throw CaptureEngineError.microphoneSwitchRequiresRestart(targetDevice.localizedName)
         }
     }
 
@@ -1316,10 +1450,12 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
             pendingArtifact = nil
             activeSessionStorage = nil
             stream = nil
+            streamConfiguration = nil
             recordingOutput = nil
             liveChunkRecorders = [:]
             microphoneInputIsDegraded = false
             systemAudioInputIsDegraded = false
+            selectedMicrophoneIDStorage = nil
             enqueueRuntimeEventLocked(
                 kind: .failed,
                 source: .capturePipeline,
@@ -1373,6 +1509,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
                 pendingArtifact = nil
                 activeSessionStorage = nil
                 stream = nil
+                streamConfiguration = nil
                 recordingOutput = nil
                 completedLiveChunksStorage = []
                 liveChunkRecorders = [:]
@@ -1382,6 +1519,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
                 lastMicrophoneSampleAt = nil
                 lastSystemAudioSampleAt = nil
                 unexpectedFailureHandled = false
+                selectedMicrophoneIDStorage = nil
             }
             continuation.resume(returning: artifact)
         case let .failure(error):
@@ -1391,6 +1529,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
                 pendingArtifact = nil
                 activeSessionStorage = nil
                 stream = nil
+                streamConfiguration = nil
                 recordingOutput = nil
                 completedLiveChunksStorage = []
                 liveChunkRecorders = [:]
@@ -1400,6 +1539,7 @@ private final class ScreenAudioCaptureRecorder: NSObject, CaptureRecorder, @unch
                 lastMicrophoneSampleAt = nil
                 lastSystemAudioSampleAt = nil
                 unexpectedFailureHandled = false
+                selectedMicrophoneIDStorage = nil
             }
             continuation.resume(throwing: error)
         }

@@ -116,6 +116,21 @@ final class OatmealCoreTests: XCTestCase {
         XCTAssertTrue(NoteTemplate.builtInTemplates.contains(where: { $0.kind == .projectReview }))
     }
 
+    func testPrivateScratchpadPersistsButDoesNotBecomeGenerationInput() {
+        let note = MeetingNote(
+            title: "Browser meeting",
+            origin: .quickNote(createdAt: date(1_700_100_000)),
+            rawNotes: "",
+            scratchpad: "Private reminder to mention the pricing concern."
+        )
+
+        let request = NoteTemplate.builtInTemplates.first(where: { $0.kind == .automatic })!.makeGenerationRequest(for: note)
+
+        XCTAssertTrue(note.hasScratchpad)
+        XCTAssertEqual(request.rawNotes, "")
+        XCTAssertFalse(note.isAIWorkspaceAvailable)
+    }
+
     func testGenerationFailurePreservesRawNotesAndTranscript() {
         let noteID = UUID()
         var note = MeetingNote(

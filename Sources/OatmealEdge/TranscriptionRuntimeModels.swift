@@ -170,17 +170,23 @@ public struct TranscriptionJobResult: Sendable {
     public var backend: NoteTranscriptionBackend
     public var executionKind: NoteTranscriptionExecutionKind
     public var warningMessages: [String]
+    /// Optional BCP 47 language tag identifying the language the backend
+    /// detected (or was locked to) for this job. Whisper-sourced values are
+    /// region-less (e.g. `"es"`); Apple-Speech-sourced values include region.
+    public var detectedLanguage: String?
 
     public init(
         segments: [TranscriptSegment],
         backend: NoteTranscriptionBackend,
         executionKind: NoteTranscriptionExecutionKind,
-        warningMessages: [String] = []
+        warningMessages: [String] = [],
+        detectedLanguage: String? = nil
     ) {
         self.segments = segments
         self.backend = backend
         self.executionKind = executionKind
         self.warningMessages = warningMessages
+        self.detectedLanguage = detectedLanguage
     }
 }
 

@@ -101,6 +101,41 @@ final class BrowserMeetingDetectionTests: XCTestCase {
         XCTAssertEqual(detections.last?.source, .browser("Arc"))
     }
 
+    func testLiveServicePromptsForGoogleMeetWhenActiveTabLooksLikeAMeeting() {
+        let workspace = FakeBrowserMeetingWorkspace()
+        workspace.frontmostApplication = NativeMeetingRunningApplication(
+            bundleIdentifier: "com.google.Chrome",
+            localizedName: "Google Chrome",
+            processIdentifier: 100
+        )
+        let activityMonitor = FakeBrowserMeetingActivityMonitor()
+        let inspector = StubBrowserMeetingContextInspector(
+            snapshot: BrowserMeetingContextSnapshot(
+                capturedAt: Date(timeIntervalSince1970: 1_700_080_070),
+                activePageURL: "https://meet.google.com/abc-defg-hij",
+                activePageTitle: "Design Review - Google Meet",
+                focusedWindowTitle: "Design Review - Google Meet",
+                meetingSurfaceName: "Google Meet"
+            )
+        )
+        let service = LiveBrowserMeetingDetectionService(
+            workspace: workspace,
+            activityMonitor: activityMonitor,
+            contextInspector: inspector,
+            supportedBrowsers: SupportedMeetingBrowser.defaults,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_080_070) }
+        )
+
+        var detections: [PendingMeetingDetection] = []
+        service.start { detections.append($0) }
+
+        XCTAssertEqual(detections.count, 1)
+        XCTAssertEqual(detections.first?.source, .browser("Google Chrome"))
+        XCTAssertEqual(detections.first?.presentation, .prompt)
+        XCTAssertEqual(detections.first?.confidence, .high)
+        XCTAssertEqual(detections.first?.title, "Design Review")
+    }
+
     func testLoadSystemStateStartsBrowserDetectionAndRoutesPromptIntoPromptShell() async {
         let detectionService = StubBrowserMeetingDetectionService()
         let model = makeModel(browserMeetingDetectionService: detectionService)
@@ -360,6 +395,33 @@ private final class FakeBrowserMeetingActivityMonitor: BrowserMeetingActivityMon
 }
 
 @MainActor
+private final class StubBrowserMeetingContextInspector: BrowserMeetingContextInspecting {
+    let capabilityState = BrowserDetectionCapabilityState(
+        accessibilityTrusted: true,
+        automationAvailability: .available
+    )
+    let snapshot: BrowserMeetingContextSnapshot
+
+    init(snapshot: BrowserMeetingContextSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func inspect(
+        application: NativeMeetingRunningApplication,
+        browser: SupportedMeetingBrowser,
+        capturedAt: Date
+    ) -> BrowserMeetingContextSnapshot {
+        BrowserMeetingContextSnapshot(
+            capturedAt: capturedAt,
+            activePageURL: snapshot.activePageURL,
+            activePageTitle: snapshot.activePageTitle,
+            focusedWindowTitle: snapshot.focusedWindowTitle,
+            meetingSurfaceName: snapshot.meetingSurfaceName
+        )
+    }
+}
+
+@MainActor
 private final class NoopNativeMeetingDetectionService: NativeMeetingDetectionServicing {
     func start(onDetection: @escaping @MainActor (PendingMeetingDetection) -> Void) {}
     func stop() {}
@@ -369,6 +431,10 @@ private final class NoopNativeMeetingDetectionService: NativeMeetingDetectionSer
 private final class StubBrowserMeetingDetectionService: BrowserMeetingDetectionServicing {
     private var handler: (@MainActor (PendingMeetingDetection) -> Void)?
     private(set) var startCalls = 0
+    let capabilityState = BrowserDetectionCapabilityState(
+        accessibilityTrusted: false,
+        automationAvailability: .unknown
+    )
 
     func start(onDetection: @escaping @MainActor (PendingMeetingDetection) -> Void) {
         startCalls += 1

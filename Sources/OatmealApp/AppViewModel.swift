@@ -68,6 +68,7 @@ final class AppViewModel {
     var searchText = ""
     var dismissedSessionControllerPresentationIdentity: String?
     var collapsedSessionControllerPresentationIdentity: String?
+    var isOnboardingComplete: Bool = OnboardingCompletion.isComplete
 
     init(
         store: InMemoryOatmealStore = .preview(),
@@ -187,6 +188,10 @@ final class AppViewModel {
 
     var detectionPromptState: MeetingDetectionPromptState? {
         MeetingDetectionPromptAdapter.promptState(for: pendingMeetingDetection)
+    }
+
+    var browserDetectionCapabilityState: BrowserDetectionCapabilityState {
+        browserMeetingDetectionService.capabilityState
     }
 
     var noteWorkspaceState: NoteWorkspacePresentationState? {
@@ -461,6 +466,37 @@ final class AppViewModel {
         await toggleCapture()
     }
 
+    func shouldWarnBeforeStoppingCapture(for noteID: MeetingNote.ID, referenceDate: Date = Date()) -> Bool {
+        guard let note = notes.first(where: { $0.id == noteID }),
+              note.captureState.isActive,
+              let startedAt = note.captureState.startedAt else {
+            return false
+        }
+
+        return referenceDate.timeIntervalSince(startedAt) < 300
+    }
+
+    func replaceScratchpad(_ text: String, for noteID: MeetingNote.ID) {
+        guard var note = store.note(id: noteID) else {
+            return
+        }
+
+        note.replaceScratchpad(text, updatedAt: nowProvider())
+        persist(note)
+    }
+
+    func availableMicrophones() -> [CaptureInputDevice] {
+        captureEngine.availableMicrophones()
+    }
+
+    func activeMicrophoneID(for noteID: MeetingNote.ID) -> String? {
+        captureEngine.activeMicrophoneID(for: noteID)
+    }
+
+    func switchActiveMicrophone(to deviceID: String, for noteID: MeetingNote.ID) async throws {
+        try await captureEngine.switchMicrophone(to: deviceID, for: noteID)
+    }
+
     func stopSessionControllerCaptureForTermination() async -> Bool {
         guard let state = sessionControllerState else {
             return true
@@ -657,6 +693,26 @@ final class AppViewModel {
 
     func refreshCapturePermissions() async {
         capturePermissions = await captureService.currentPermissions(calendarStatus: calendarAccessStatus)
+    }
+
+    func requestMicrophoneAccess() async {
+        _ = await captureService.requestPermissions(
+            requiresSystemAudio: false,
+            calendarStatus: calendarAccessStatus
+        )
+        await refreshCapturePermissions()
+    }
+
+    func requestSystemAudioAccess() async {
+        _ = await captureService.requestPermissions(
+            requiresSystemAudio: true,
+            calendarStatus: calendarAccessStatus
+        )
+        await refreshCapturePermissions()
+    }
+
+    func onboardingCompletionDidChange() {
+        isOnboardingComplete = OnboardingCompletion.isComplete
     }
 
     func refreshTranscriptionRuntimeState() async {
@@ -1921,6 +1977,7 @@ final class AppViewModel {
                         backend: result.backend,
                         executionKind: result.executionKind,
                         warnings: result.warningMessages,
+                        language: result.detectedLanguage,
                         at: nowProvider()
                     )
                     statusMessages.append(contentsOf: result.warningMessages)

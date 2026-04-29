@@ -199,6 +199,11 @@ private final class MeetingDetectionLifecycleNoopNativeDetectionService: NativeM
 
 @MainActor
 private final class MeetingDetectionLifecycleNoopBrowserDetectionService: BrowserMeetingDetectionServicing {
+    let capabilityState = BrowserDetectionCapabilityState(
+        accessibilityTrusted: false,
+        automationAvailability: .unknown
+    )
+
     func start(onDetection: @escaping @MainActor (PendingMeetingDetection) -> Void) {}
     func stop() {}
 }

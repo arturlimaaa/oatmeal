@@ -60,6 +60,17 @@ struct OatmealSettingsView: View {
                     )
                 )
 
+                LabeledContent(
+                    "Browser detection",
+                    value: model.browserDetectionCapabilityState.automationAvailability == .available
+                        ? "Full"
+                        : "Limited"
+                )
+
+                Text(model.browserDetectionCapabilityState.detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 if !launchAtLogin {
                     Text("Auto-detection works best when Oatmeal launches at login, so it is already running when you join a call.")
                         .font(.caption)
@@ -274,6 +285,13 @@ struct OatmealSettingsView: View {
                 LabeledContent("Transcription strategy", value: "Offline-first runtime plan with explicit fallback")
                 LabeledContent("Summary strategy", value: "Local structured notes with deterministic fallback")
                 LabeledContent("Model training", value: "Disabled for third-party providers")
+            }
+
+            Section("Advanced") {
+                Button("Replay welcome & permissions onboarding") {
+                    OnboardingCompletion.reset()
+                    model.onboardingCompletionDidChange()
+                }
             }
         }
         .task {

@@ -2,29 +2,48 @@ import Foundation
 import OatmealCore
 
 enum WhisperJSONParser {
+    struct ParseResult: Equatable {
+        let segments: [TranscriptSegment]
+        let detectedLanguage: String?
+    }
+
     static func parseTranscriptSegments(
         data: Data,
         startedAt: Date?
     ) throws -> [TranscriptSegment] {
+        try parse(data: data, startedAt: startedAt).segments
+    }
+
+    static func parse(
+        data: Data,
+        startedAt: Date?
+    ) throws -> ParseResult {
         let object = try JSONSerialization.jsonObject(with: data)
         let walker = JSONWalker(startedAt: startedAt)
+        let detectedLanguage = walker.extractDetectedLanguage(from: object)
         let candidates = walker.collectSegments(from: object)
 
         if !candidates.isEmpty {
-            return candidates.map(\.segment)
+            return ParseResult(
+                segments: candidates.map(\.segment),
+                detectedLanguage: detectedLanguage
+            )
         }
 
         if let text = walker.extractFirstTranscriptText(from: object)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty {
-            return [
-                TranscriptSegment(
-                    startTime: startedAt,
-                    endTime: startedAt,
-                    speakerName: nil,
-                    text: text,
-                    confidence: nil
-                )
-            ]
+            return ParseResult(
+                segments: [
+                    TranscriptSegment(
+                        startTime: startedAt,
+                        endTime: startedAt,
+                        speakerName: nil,
+                        text: text,
+                        confidence: nil
+                    )
+                ],
+                detectedLanguage: detectedLanguage
+            )
         }
 
         throw TranscriptionPipelineError.transcriptionFailed("whisper.cpp did not return any transcript segments.")
@@ -54,6 +73,37 @@ private struct JSONWalker {
                 return lhs < rhs
             }
             .removingAdjacentDuplicates()
+    }
+
+    /// Walks the whisper.cpp JSON looking for the detected language tag.
+    ///
+    /// whisper.cpp's `-ojf` output places the value at `result.language`, but
+    /// older builds may surface it at the top level as `language` or under
+    /// `params.language`. We scan all dictionaries and return the first
+    /// non-empty `language` string we find. If absent we return `nil`.
+    func extractDetectedLanguage(from object: Any) -> String? {
+        if let dictionary = object as? [String: Any] {
+            if let language = dictionary["language"] as? String {
+                let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty, trimmed.lowercased() != "auto" {
+                    return trimmed
+                }
+            }
+
+            for value in dictionary.values {
+                if let language = extractDetectedLanguage(from: value) {
+                    return language
+                }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let language = extractDetectedLanguage(from: value) {
+                    return language
+                }
+            }
+        }
+
+        return nil
     }
 
     func extractFirstTranscriptText(from object: Any) -> String? {
