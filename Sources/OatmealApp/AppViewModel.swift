@@ -23,6 +23,7 @@ final class AppViewModel {
     private let transcriptionService: any LocalTranscriptionServicing
     private let summaryService: any LocalSummaryServicing
     private let summaryModelManager: any LocalSummaryModelManaging
+    private let whisperModelManager: any LocalWhisperModelManaging
     private let assistantService: any SingleMeetingAssistantServicing
     private let persistence: AppPersistence
     private let audioRetentionCoordinator: AudioRetentionCoordinator
@@ -37,6 +38,7 @@ final class AppViewModel {
     private let meetingEndedSuggestionMessage = "Oatmeal thinks this meeting may have ended. Stop recording when you are ready, or keep recording if the conversation is still going."
     private let interruptedAssistantTurnMessage = "Oatmeal was relaunched before this answer completed. Ask again to regenerate it."
     @ObservationIgnored private var summaryModelManagementTask: Task<Void, Never>?
+    @ObservationIgnored private var whisperModelInstallTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var hasStartedNativeMeetingDetection = false
     @ObservationIgnored private var hasStartedBrowserMeetingDetection = false
     @ObservationIgnored private var activeDetectedMeetingSource: PendingMeetingDetection.Source?
@@ -59,6 +61,9 @@ final class AppViewModel {
     var summaryModelCatalogState: SummaryModelCatalogState?
     var activeSummaryModelOperation: SummaryModelOperationState?
     var summaryModelManagementError: String?
+    var whisperModelCatalogState: WhisperModelCatalogState?
+    var whisperModelInstallProgress: [String: Double] = [:]
+    var whisperModelManagementError: String?
     var summaryExecutionPlansByNoteID: [MeetingNote.ID: LocalSummaryExecutionPlan] = [:]
     var selectedSidebarItem: SidebarItem = .upcoming
     var selectedUpcomingEventID: CalendarEvent.ID?
@@ -82,6 +87,7 @@ final class AppViewModel {
         transcriptionService: (any LocalTranscriptionServicing)? = nil,
         summaryService: (any LocalSummaryServicing)? = nil,
         summaryModelManager: (any LocalSummaryModelManaging)? = nil,
+        whisperModelManager: (any LocalWhisperModelManaging)? = nil,
         persistence: AppPersistence = .shared,
         nowProvider: @escaping () -> Date = Date.init,
         liveTranscriptionPollingInterval: TimeInterval = 4,
@@ -106,6 +112,9 @@ final class AppViewModel {
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
         self.summaryModelManager = summaryModelManager ?? LocalSummaryModelManager(
+            applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
+        )
+        self.whisperModelManager = whisperModelManager ?? LocalWhisperModelManager(
             applicationSupportDirectoryURL: persistence.applicationSupportDirectoryURL
         )
         self.assistantService = assistantService ?? GroundedSingleMeetingAssistantService()
@@ -683,6 +692,7 @@ final class AppViewModel {
         await refreshTranscriptionRuntimeState()
         await refreshSummaryRuntimeState()
         await refreshSummaryModelCatalogState()
+        await refreshWhisperModelCatalogState()
         startNativeMeetingDetectionIfNeeded()
         startBrowserMeetingDetectionIfNeeded()
         suggestEndedMeetingsIfNeeded()
@@ -775,6 +785,10 @@ final class AppViewModel {
 
     func refreshSummaryModelCatalogState() async {
         summaryModelCatalogState = await summaryModelManager.catalogState()
+    }
+
+    func refreshWhisperModelCatalogState() async {
+        whisperModelCatalogState = await whisperModelManager.catalogState()
     }
 
     func startQuickNote() {
@@ -1129,6 +1143,69 @@ final class AppViewModel {
                 summaryModelManagementError = error.localizedDescription
                 activeSummaryModelOperation = nil
                 await refreshSummaryModelCatalogState()
+            }
+        }
+    }
+
+    func installWhisperModel(_ modelID: String) {
+        guard whisperModelInstallTasks[modelID] == nil else {
+            return
+        }
+
+        whisperModelManagementError = nil
+        whisperModelInstallProgress[modelID] = 0
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let state = try await self.whisperModelManager.install(
+                    modelID: modelID,
+                    forceRedownload: false,
+                    progress: { [weak self] fraction in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.whisperModelInstallProgress[modelID] = fraction
+                        }
+                    }
+                )
+                self.whisperModelCatalogState = state
+                self.whisperModelInstallProgress.removeValue(forKey: modelID)
+                self.whisperModelInstallTasks.removeValue(forKey: modelID)
+                await self.refreshTranscriptionRuntimeState()
+            } catch is CancellationError {
+                self.whisperModelInstallProgress.removeValue(forKey: modelID)
+                self.whisperModelInstallTasks.removeValue(forKey: modelID)
+                await self.refreshWhisperModelCatalogState()
+            } catch {
+                self.whisperModelManagementError = error.localizedDescription
+                self.whisperModelInstallProgress.removeValue(forKey: modelID)
+                self.whisperModelInstallTasks.removeValue(forKey: modelID)
+                await self.refreshWhisperModelCatalogState()
+            }
+        }
+        whisperModelInstallTasks[modelID] = task
+    }
+
+    func cancelWhisperModelInstall(_ modelID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.whisperModelManager.cancelInstall(modelID: modelID)
+            // The install task itself observes cancellation and refreshes
+            // catalog state; nothing further to do here.
+        }
+    }
+
+    func removeWhisperModel(_ modelID: String) {
+        whisperModelManagementError = nil
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let state = try await self.whisperModelManager.remove(modelID: modelID)
+                self.whisperModelCatalogState = state
+                await self.refreshTranscriptionRuntimeState()
+            } catch {
+                self.whisperModelManagementError = error.localizedDescription
+                await self.refreshWhisperModelCatalogState()
             }
         }
     }

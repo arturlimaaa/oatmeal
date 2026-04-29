@@ -186,6 +186,40 @@ struct OatmealSettingsView: View {
                 }
             }
 
+            Section("Multilingual models") {
+                if let catalogState = model.whisperModelCatalogState {
+                    Text(
+                        "Download a multilingual Whisper model to transcribe non-English meetings or use auto-detect. Models save to the managed models folder and are picked up automatically."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    if let error = model.whisperModelManagementError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    ForEach(orderedWhisperCatalogItems(from: catalogState)) { item in
+                        WhisperModelCatalogRow(
+                            item: item,
+                            qualityHint: item.catalogEntry.qualityHint(
+                                for: targetLanguageBCP47ForHints()
+                            ),
+                            installProgress: model.whisperModelInstallProgress[item.id],
+                            isInstalling: model.whisperModelInstallProgress[item.id] != nil,
+                            onDownload: { model.installWhisperModel(item.id) },
+                            onCancel: { model.cancelWhisperModelInstall(item.id) },
+                            onRemove: { model.removeWhisperModel(item.id) }
+                        )
+                    }
+
+                    LabeledContent("Models folder", value: catalogState.modelsDirectoryURL.path)
+                } else {
+                    ProgressView("Inspecting model catalog…")
+                }
+            }
+
             Section("Enhanced Notes") {
                 Picker(
                     "Backend",
@@ -348,6 +382,7 @@ struct OatmealSettingsView: View {
             await model.refreshTranscriptionRuntimeState()
             await model.refreshSummaryRuntimeState()
             await model.refreshSummaryModelCatalogState()
+            await model.refreshWhisperModelCatalogState()
         }
         .formStyle(.grouped)
         .padding(20)
@@ -398,6 +433,41 @@ struct OatmealSettingsView: View {
         runtimeState.preferredModelName
             ?? model.summaryConfiguration.preferredModelName
             ?? "Auto"
+    }
+
+    /// Returns the BCP 47 language code we use to look up curated quality
+    /// hints. Falls back to English when the user has chosen Auto-detect so
+    /// the section still renders informative guidance instead of a row of
+    /// "no opinion" entries.
+    private func targetLanguageBCP47ForHints() -> String {
+        guard let identifier = model.transcriptionConfiguration.preferredLocaleIdentifier else {
+            return "en"
+        }
+        return LanguagePolicy.whisperLanguageArgument(for: identifier)
+    }
+
+    /// Catalog entries ranked for the user's target language, with already-
+    /// installed entries pinned to the top so the user can immediately
+    /// confirm what's on disk.
+    private func orderedWhisperCatalogItems(
+        from state: WhisperModelCatalogState
+    ) -> [WhisperModelCatalogItemState] {
+        let bcp47 = targetLanguageBCP47ForHints()
+        let recommendedOrder = CuratedModelCatalog.recommendations(
+            for: bcp47,
+            in: state.items.map { $0.catalogEntry }
+        )
+        let lookup = Dictionary(uniqueKeysWithValues: state.items.map { ($0.id, $0) })
+        let ranked = recommendedOrder.compactMap { lookup[$0.id] }
+        return ranked.sorted { lhs, rhs in
+            let lhsInstalled = lhs.installedModel != nil
+            let rhsInstalled = rhs.installedModel != nil
+            if lhsInstalled != rhsInstalled {
+                return lhsInstalled
+            }
+            return ranked.firstIndex(where: { $0.id == lhs.id }) ?? 0
+                < (ranked.firstIndex(where: { $0.id == rhs.id }) ?? 0)
+        }
     }
 
     private func unavailablePreferredSummaryModelName(for runtimeState: LocalSummaryRuntimeState) -> String? {
@@ -499,5 +569,81 @@ private struct SummaryModelCatalogRow: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
+    }
+}
+
+private struct WhisperModelCatalogRow: View {
+    let item: WhisperModelCatalogItemState
+    let qualityHint: QualityTier?
+    let installProgress: Double?
+    let isInstalling: Bool
+    let onDownload: () -> Void
+    let onCancel: () -> Void
+    let onRemove: () -> Void
+
+    private var isInstalled: Bool {
+        item.installedModel != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(item.catalogEntry.displayName)
+                    .font(.headline)
+
+                if isInstalled {
+                    badge("Installed")
+                }
+
+                if let qualityHint {
+                    badge(qualityHint.displayName)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Text(ByteCountFormatter.string(fromByteCount: item.catalogEntry.sizeBytes, countStyle: .file))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Text(item.catalogEntry.sizeTier.rawValue.capitalized)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if isInstalling, let progress = installProgress {
+                ProgressView(value: progress, total: 1.0)
+                    .progressViewStyle(.linear)
+            }
+
+            HStack(spacing: 10) {
+                if isInstalling {
+                    Button("Cancel", role: .cancel, action: onCancel)
+                } else if isInstalled {
+                    Button("Remove", role: .destructive, action: onRemove)
+                } else {
+                    Button("Download", action: onDownload)
+                }
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
+    }
+}
+
+private extension QualityTier {
+    var displayName: String {
+        switch self {
+        case .recommended: "Recommended"
+        case .acceptable: "Acceptable"
+        case .notRecommended: "Not recommended"
+        }
     }
 }
